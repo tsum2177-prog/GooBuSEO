@@ -1,6 +1,6 @@
+import { generateReply, isAiConfigured } from "@/lib/ai";
 import { replyToReview } from "./business";
 import { getValidAccessToken, listConnections } from "./connections";
-import { generateReply, isOpenAIConfigured } from "@/lib/openai";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export async function autoReplyPendingReviews(userId: string): Promise<{
@@ -19,7 +19,7 @@ export async function autoReplyPendingReviews(userId: string): Promise<{
     return { replied: 0, skipped: 0 };
   }
 
-  if (!isOpenAIConfigured()) {
+  if (!isAiConfigured()) {
     return { replied: 0, skipped: 0 };
   }
 

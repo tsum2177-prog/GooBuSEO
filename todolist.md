@@ -10,7 +10,7 @@
 | 2 | Stripe決済・サブスク状態更新 | ✅ 実装済（キー未設定で未検証） |
 | 3 | 店舗設定（強み・SEOキーワード）／レビュー履歴UI | ✅ 完了・動作確認済 |
 | 4 | Google Business Profile OAuth連携・レビュー取得 | ✅ 実装済（未検証） |
-| 5 | OpenAI返信生成・Google APIへの投稿 | ✅ 実装済（未検証） |
+| 5 | Geminiによる返信生成・Google APIへの投稿 | ✅ 実装済（未検証） |
 
 実装済みだが**外部サービスの設定が必要で未検証**のものが残っています。
 
@@ -60,9 +60,9 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 ---
 
-## 3. OpenAI（フェーズ5）— AI返信生成
+## 3. Gemini（フェーズ5）— AI返信生成
 
-- [ ] `OPENAI_API_KEY` を `.env.local` に設定
+- [ ] `GEMINI_API_KEY` を `.env.local` に設定（[Google AI Studio](https://aistudio.google.com/apikey)）
 - [ ] 低評価（1〜3点）→ SEOキーワードが入らないこと
 - [ ] 高評価（4〜5点）→ 設定したSEOキーワードが自然に混入すること
 - [ ] キーワード未設定店舗でも自然な文章になること
@@ -94,7 +94,7 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 - [ ] Secretを登録（`npx wrangler secret put <KEY>`）
       `SUPABASE_SERVICE_ROLE_KEY` / `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` /
       `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `GOOGLE_TOKEN_ENCRYPTION_KEY` /
-      `OPENAI_API_KEY` / `CRON_SECRET`
+      `GEMINI_API_KEY` / `CRON_SECRET`
 - [ ] `NEXT_PUBLIC_*` はビルド時にインライン化されるため、**ビルド時点の `.env.local`** に正しい値が入っていることを確認
 - [ ] `npm run deploy` でデプロイ
 - [ ] `supabase/setup-all.sql` を本番用Supabaseプロジェクトで実行

@@ -8,7 +8,7 @@
 - Supabase (Auth / DB)
 - Stripe (月額課金)
 - Google Business Profile API (レビュー取得・返信投稿)
-- OpenAI API (返信文の自動生成)
+- Gemini API (返信文の自動生成 / `gemini-3.5-flash-lite`)
 - **Cloudflare Workers**（OpenNext でデプロイ）
 
 ## セットアップ
@@ -84,10 +84,12 @@ openssl rand -hex 32
 
 > **注意**: Business Profile API を一般の店舗ユーザーに提供するには、Googleによるアクセス承認（審査）が必要です。審査前のPJでは自分のアカウントの店舗のみ認識されます。実店舗への提供開始は審査完了が前提です。
 
-### 6. OpenAIの設定（フェーズ5）
+### 6. Geminiの設定（フェーズ5）
 
-1. [platform.openai.com](https://platform.openai.com/) でAPIキーを作成
-2. `.env.local` に `OPENAI_API_KEY` を設定（モデル変更は `OPENAI_MODEL`、既定は `gpt-4o-mini`）
+1. [Google AI Studio](https://aistudio.google.com/apikey) でAPIキーを作成
+2. `.env.local` に `GEMINI_API_KEY` を設定（モデル変更は `GEMINI_MODEL`、既定は `gemini-3.5-flash-lite`）
+
+> OpenAI互換エンドポイント（`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`）を直接叩いているため、OpenAI SDKは不要です。
 
 ### 7. 起動
 
@@ -143,7 +145,7 @@ npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
 npx wrangler secret put GOOGLE_REDIRECT_URI
 npx wrangler secret put GOOGLE_TOKEN_ENCRYPTION_KEY
-npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put GEMINI_API_KEY
 npx wrangler secret put CRON_SECRET
 ```
 
@@ -198,7 +200,7 @@ src/
 ├── proxy.ts                 # セッション更新とルート保護（Next.js 16のmiddleware後継）
 ├── lib/
 │   ├── crypto.ts            # Googleトークンの暗号化（AES-256-GCM）
-│   ├── openai.ts            # AI返信文の生成
+│   ├── ai.ts                 # AI返信文の生成（Gemini / OpenAI互換エンドポイント）
 │   ├── origin.ts            # リクエスト元のオリジン取得
 │   ├── google/
 │   │   ├── oauth.ts         # OAuth2.0（認証URL・コード交換・トークン更新）
@@ -249,4 +251,4 @@ worker.ts                   # Workersカスタムラッパー（cronのscheduled
 - **フェーズ2（完了）**: Stripe決済・サブスク状態の更新（profilesテーブル・Checkout・webhook）
 - **フェーズ3（完了）**: ダッシュボード（SEOキーワード設定・レビュー履歴）
 - **フェーズ4（完了）**: Google Business Profile API OAuth連携・レビュー取得
-- **フェーズ5（完了）**: OpenAI返信生成・Google APIへの返信投稿
+- **フェーズ5（完了）**: Geminiによる返信生成・Google APIへの返信投稿

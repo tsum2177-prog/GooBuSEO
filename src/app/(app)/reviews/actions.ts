@@ -2,9 +2,9 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { generateReply, isAiConfigured } from "@/lib/ai";
 import { replyToReview } from "@/lib/google/business";
 import { getValidAccessToken, listConnections } from "@/lib/google/connections";
-import { generateReply, isOpenAIConfigured } from "@/lib/openai";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -39,7 +39,7 @@ export async function generateAndPostReply(
     return { status: "error", message: "レビューが見つかりませんでした。" };
   }
 
-  if (!isOpenAIConfigured()) {
+  if (!isAiConfigured()) {
     return {
       status: "error",
       message: "AI返信機能の設定が完了していません。",

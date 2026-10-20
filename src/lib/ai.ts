@@ -1,5 +1,10 @@
-export function isOpenAIConfigured(): boolean {
-  return Boolean(process.env.OPENAI_API_KEY);
+const GEMINI_CHAT_COMPLETIONS_URL =
+  "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+
+const DEFAULT_MODEL = "gemini-3.5-flash-lite";
+
+export function isAiConfigured(): boolean {
+  return Boolean(process.env.GEMINI_API_KEY);
 }
 
 export type ReplyInput = {
@@ -40,9 +45,9 @@ function buildSystemPrompt(isLowRating: boolean): string {
 }
 
 export async function generateReply(input: ReplyInput): Promise<string> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("OPENAI_API_KEY が設定されていません");
+    throw new Error("GEMINI_API_KEY が設定されていません");
   }
 
   const isLowRating = input.rating <= 3;
@@ -58,14 +63,14 @@ export async function generateReply(input: ReplyInput): Promise<string> {
     `【レビュー本文】${input.reviewText}`,
   ].join("\n");
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const response = await fetch(GEMINI_CHAT_COMPLETIONS_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      model: process.env.GEMINI_MODEL ?? DEFAULT_MODEL,
       messages: [
         { role: "system", content: buildSystemPrompt(isLowRating) },
         { role: "user", content: userPrompt },
@@ -74,7 +79,7 @@ export async function generateReply(input: ReplyInput): Promise<string> {
   });
 
   if (!response.ok) {
-    throw new Error("OpenAI APIでエラーが発生しました");
+    throw new Error("AI APIでエラーが発生しました");
   }
 
   const data = (await response.json()) as {
@@ -82,7 +87,7 @@ export async function generateReply(input: ReplyInput): Promise<string> {
   };
   const content = data.choices?.[0]?.message?.content?.trim();
   if (!content) {
-    throw new Error("OpenAI APIから返信文を取得できませんでした");
+    throw new Error("AI APIから返信文を取得できませんでした");
   }
 
   return content;
