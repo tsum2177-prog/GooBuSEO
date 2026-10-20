@@ -99,6 +99,13 @@ http://localhost:3000 を開く
 
 > **開発時の注意**: Next.js 16 は開発サーバーへの別オリジンからのアクセスを遮断します。`http://127.0.0.1:3000` や LAN の IP でアクセスする場合は、`next.config.ts` の `allowedDevOrigins` にそのホストを追加してください（`127.0.0.1` は設定済み）。この設定が無いと HMR 接続が遮断され、**React がハイドレーションされずボタンなどが一切反応しません**（本番ビルドでは起こりません）。
 
+> **メモリ不足でビルドが失敗する場合**: `Zone Allocation failed - process out of memory` が出る場合は、ブラウザを閉じて空きメモリを増やしたうえで、heapを拡張して実行してください。
+>
+> ```bash
+> set NODE_OPTIONS=--max-old-space-size=6144 && npm run build   # Windows (cmd)
+> NODE_OPTIONS=--max-old-space-size=6144 npm run build         # macOS / Linux
+> ```
+
 ## 検証手順
 
 1. 未ログインで `/dashboard` `/settings` `/reviews` → `/login` へリダイレクトされること

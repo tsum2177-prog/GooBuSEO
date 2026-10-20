@@ -128,7 +128,9 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 ```bash
 npm run lint
-npm run build
+# メモリ不足（Zone Allocation failed）で失敗する場合は
+set NODE_OPTIONS=--max-old-space-size=6144 && npm run build   # Windows (cmd)
+NODE_OPTIONS=--max-old-space-size=6144 npm run build         # macOS / Linux
 ```
 
 ---

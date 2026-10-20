@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { connection } from "next/server";
 import { redirect } from "next/navigation";
 import { PlanCard, type SubscriptionStatus } from "@/components/billing/plan-card";
 import { StarRating } from "@/components/reviews/review-list";
@@ -51,6 +52,8 @@ export default async function DashboardPage({
   searchParams: Promise<{ checkout?: string }>;
 }) {
   const { checkout } = await searchParams;
+  await connection();
+
   const supabase = await createClient();
   const {
     data: { user },

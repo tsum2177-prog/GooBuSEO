@@ -24,11 +24,15 @@ async function handleSync(request: Request) {
   let replied = 0;
 
   for (const userId of userIds) {
-    const result = await syncReviews(userId);
-    imported += result.imported;
+    try {
+      const result = await syncReviews(userId);
+      imported += result.imported;
 
-    const auto = await autoReplyPendingReviews(userId);
-    replied += auto.replied;
+      const auto = await autoReplyPendingReviews(userId);
+      replied += auto.replied;
+    } catch (error) {
+      console.error("sync failed for user", userId, error);
+    }
   }
 
   return NextResponse.json({
