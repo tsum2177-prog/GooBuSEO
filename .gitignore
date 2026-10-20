@@ -33,6 +33,7 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 !.env.example
+!.env
 
 # vercel
 .vercel
@@ -43,3 +44,9 @@ next-env.d.ts
 
 # command code
 /.commandcode/
+
+# cloudflare
+/.open-next/
+/.dev.vars
+/.wrangler/
+/cloudflare-env.d.ts

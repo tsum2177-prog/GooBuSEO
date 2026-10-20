@@ -74,27 +74,41 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 ## 4. レビュー自動取得（運用）
 
-- [ ] `CRON_SECRET` を `.env.local` に設定
-- [ ] `/api/reviews/sync` を `Authorization: Bearer <CRON_SECRET>` で定期実行
-  - `vercel.json` に `{"crons":[{"path":"/api/reviews/sync","schedule":"0 * * * *"}]}` を追加済み（Vercel CronはGETで、`Authorization: Bearer $CRON_SECRET` を自動送信する）
-  - Vercel Hobbyプランは1日1回まで。1時間ごとの実行にはProプランが必要
-- [ ] 店舗ごとの取得頻度を決める（推奨: 1〜2時間ごと）
+- [x] `CRON_SECRET` を `.env.local` / `.dev.vars` に設定（生成済み）
+- [x] Cloudflareのcron（`wrangler.jsonc` の `triggers.crons`）で1時間ごとに `/api/reviews/sync` を実行
+  - `worker.ts` の scheduled handler が `CRON_SECRET` 付きで内部呼び出し（Cloudflareのcronは認証ヘッダーを付けられないため）
+  - ローカル発火確認: `curl http://127.0.0.1:8787/cdn-cgi/local/scheduled` → `[cron] /api/reviews/sync -> 200` を確認済み
+- [ ] 本番デプロイ後、cronが実際に稼働していることを確認（Cloudflare ダッシュボードの Logs）
 - [ ] 自動返信ONの店舗で、取得→自動生成→自動投稿まで通ることを確認
 - [ ] 自動返信OFFの店舗では自動投稿されないことを確認
 - [ ] レビュー一覧で「AIが自動で作成した返信」/「AIが作成した返信」の表示が正しいこと
 
 ---
 
-## 5. 本番デプロイ
+## 5. 本番デプロイ（Cloudflare Workers）
 
-- [ ] Vercel 等にプロジェクトを登録
-- [ ] 環境変数を本番側で設定（`NEXT_PUBLIC_*`, `SUPABASE_SERVICE_ROLE_KEY`, `STRIPE_*`, `GOOGLE_*`, `OPENAI_*`, `CRON_SECRET`）
+- [x] OpenNext / wrangler の導入と設定（`open-next.config.ts` / `wrangler.jsonc` / `worker.ts` / `public/_headers`）
+- [x] workerdローカルでの動作確認（`npm run preview`）— ログイン・設定保存・ルート保護・cronをすべて確認済み
+- [ ] Cloudflare アカウントで **Workers Paid プラン** に加入（FreeはWorker 3MB・CPU 10ms制限で不足）
+- [ ] `npx wrangler login`
+- [ ] Secretを登録（`npx wrangler secret put <KEY>`）
+      `SUPABASE_SERVICE_ROLE_KEY` / `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` /
+      `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` / `GOOGLE_TOKEN_ENCRYPTION_KEY` /
+      `OPENAI_API_KEY` / `CRON_SECRET`
+- [ ] `NEXT_PUBLIC_*` はビルド時にインライン化されるため、**ビルド時点の `.env.local`** に正しい値が入っていることを確認
+- [ ] `npm run deploy` でデプロイ
 - [ ] `supabase/setup-all.sql` を本番用Supabaseプロジェクトで実行
 - [ ] `GOOGLE_TOKEN_ENCRYPTION_KEY` は本番・開発で**別の値**を生成する（開発時のままだとトークン復号に失敗する）
-- [ ] Stripe Webhook のエンドポイントを本番ドメインに変更
+- [ ] Stripe Webhook のエンドポイントを本番ドメイン（`https://<domain>/api/stripe/webhook`）に変更
+- [ ] 独自ドメインを設定（Workers → Settings → Domains）
 - [ ] 確認: 未ログインリダイレクト／新規登録／設定保存／レビュー取得／決済
 
 **注意**: 本番では Supabase の「Confirm email」をOFFのままにしない（未確認アカウントの攻撃リスクが増大）。開発時のみOFFにしてください。
+
+**Cloudflare固有の制約**:
+- Cache Components（`cacheComponents`）はworkerdと非互換のため**使用不可**。`await connection()` と `export const instant` も使わない
+- Node.js middleware（`proxy.ts`）はCloudflare公式でexperimental（動作は確認済み）
+- Windowsでのビルドは非推奨（WSL または GitHub Actions 推奨。`npm run deploy` はWindowsでも動作）
 
 ---
 
@@ -110,7 +124,7 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 - [ ] `SUPABASE_SERVICE_ROLE_KEY` はサーバー専用。クライアントへ渡っていないことを再確認
 - [ ] `GOOGLE_TOKEN_ENCRYPTION_KEY` をパスワードマネージャなどで管理（失うと再連携が必要）
-- [ ] エラー監視（Vercel Logs / Sentry等）の導入
+- [ ] エラー監視（Cloudflare Logs / Sentry等）の導入
 - [ ] 店舗ごとの「AI返信が自動投稿される」ことを店舗자에게事前周知（公開レビューになる点）
 - [ ] 自動投稿ではなく「生成→確認→投稿」の2段階にする案も検討（誤投稿リスク回避）
 

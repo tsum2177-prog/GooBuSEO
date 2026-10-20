@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { connection } from "next/server";
 import { redirect } from "next/navigation";
 import { ReviewList, type ReviewItem } from "@/components/reviews/review-list";
 import { createClient } from "@/lib/supabase/server";
@@ -8,11 +7,9 @@ export const metadata: Metadata = {
   title: "レビュー履歴",
 };
 
-export const instant = false;
+export const dynamic = "force-dynamic";
 
 export default async function ReviewsPage() {
-  await connection();
-
   const supabase = await createClient();
   const {
     data: { user },

@@ -9,6 +9,7 @@
 - Stripe (月額課金)
 - Google Business Profile API (レビュー取得・返信投稿)
 - OpenAI API (返信文の自動生成)
+- **Cloudflare Workers**（OpenNext でデプロイ）
 
 ## セットアップ
 
@@ -91,7 +92,7 @@ openssl rand -hex 32
 ### 7. 起動
 
 ```bash
-npm install
+npm install --include=dev
 npm run dev
 ```
 
@@ -105,6 +106,74 @@ http://localhost:3000 を開く
 > set NODE_OPTIONS=--max-old-space-size=6144 && npm run build   # Windows (cmd)
 > NODE_OPTIONS=--max-old-space-size=6144 npm run build         # macOS / Linux
 > ```
+
+## デプロイ（Cloudflare Workers）
+
+Cloudflare Pages の旧来のNext.js対応（`@cloudflare/next-on-pages`）は非推奨のため、**Cloudflare Workers + OpenNext** でデプロイします。
+
+### 1. 前提
+
+- Cloudflare アカウント（Workers **Paid** プラン推奨。FreeプランはWorkerサイズ3MB・CPU時間10ms制限で本アプリには不足します）
+- `npm install --include=dev`（`NODE_ENV=production` が設定されている環境では devDependencies が入れられないため）
+
+### 2. ローカルで動作確認（workerd）
+
+```bash
+npm run preview     # ビルドして Workers ランタイムでローカル起動（http://127.0.0.1:8787）
+```
+
+`.dev.vars`（gitignore対象）にローカル用の環境変数を置いてください。`NEXTJS_ENV=development` を含めると `.env.local` が読み込まれます。
+
+### 3. Cloudflare へログイン
+
+```bash
+npx wrangler login
+```
+
+### 4. Secret（環境変数）を登録
+
+`NEXT_PUBLIC_*` はビルド時にインライン化されるため、**ビルド時に `.env.local` が必要です**。サーバー実行時に必要な値は Secret として登録します。
+
+```bash
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+npx wrangler secret put STRIPE_SECRET_KEY
+npx wrangler secret put STRIPE_PRICE_ID
+npx wrangler secret put STRIPE_WEBHOOK_SECRET
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put GOOGLE_REDIRECT_URI
+npx wrangler secret put GOOGLE_TOKEN_ENCRYPTION_KEY
+npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put CRON_SECRET
+```
+
+### 5. デプロイ
+
+```bash
+npm run deploy      # opennextjs-cloudflare build && opennextjs-cloudflare deploy
+```
+
+デプロイ後は `https://<worker名>.< subdomain>.workers.dev` でアクセスできます。独自ドメインは Cloudflare ダッシュボードの Workers → Settings → Domains で設定します。
+
+### 6. 自動取得（cron）
+
+`wrangler.jsonc` の `triggers.crons` で **1時間ごとに** `/api/reviews/sync` が実行されます（`worker.ts` の scheduled handler が `CRON_SECRET` 付きで内部呼び出しします）。`CRON_SECRET` が未設定だとログにエラーが出て実行されません。
+
+ローカルでcronを手動発火する場合:
+
+```bash
+curl http://127.0.0.1:8787/cdn-cgi/local/scheduled
+```
+
+### Cloudflare固有の制約（重要）
+
+| 制約 | 対応 |
+|---|---|
+| **Cache Components（`cacheComponents`）は使用不可** | workerdの `setTimeout()` 実装と非互換でページ描画がハングします。`next.config.ts` で無効化済み。`await connection()` / `export const instant` は使わない |
+| **Node.js middleware（`proxy.ts`）はexperimental** | 公式は「動作保証なし」。動作は確認済みですが、Cloudflareの更新で変わる可能性があります |
+| Workerサイズ上限 | Free 3MB / Paid 10MB（gzip後）。`stripe` と `supabase-js` が大きいためPaid推奨 |
+| R2 / D1 / Durable Objects は**不要** | 全ルートが動的（SSR）のため、キャッシュ設定なしで動作します |
+| Windowsでのビルドは非推奨 | 公式は WSL または CI（GitHub Actions）でのビルドを推奨。`npm run deploy` は Windows でも動作します |
 
 ## 検証手順
 
@@ -162,11 +231,14 @@ src/
     ├── auth/confirm/        # メール確認リンク処理
     └── error/               # 認証エラーページ
 supabase/migrations/         # DBマイグレーションSQL
+open-next.config.ts         # OpenNext（Cloudflare Workers）設定
+wrangler.jsonc              # Workers設定（assets・cron・compatibility flags）
+worker.ts                   # Workersカスタムラッパー（cronのscheduled handler）
 ```
 
 ## 運用メモ
 
-- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得する場合は `/api/reviews/sync` を `Authorization: Bearer <CRON_SECRET>` で定期実行（Vercel Cronの場合は `vercel.json` の設定がそのまま使われます）してください。
+- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得はCloudflareのcron（`wrangler.jsonc` の `triggers.crons`）が1時間ごとに `/api/reviews/sync` を実行します。
 - **自動返信**: `/settings` の「自動返信をONにする」がONの店舗だけ、取得したレビューへ自動で返信を投稿します（初期値はOFF）。手動で投稿したものは「AIが作成した返信」、自動のものは「AIが自動で作成した返信」と表示されます。
 - **AI返信の投稿**: 低評価（1〜3点）は「謝罪・改善案のみ、SEOキーワードは入れない」、高評価（4〜5点）は「感謝 + SEOキーワードを自然に盛り込み」。生成した文はそのままGoogleマップへ投稿されます。
 - **トークン管理**: Googleのアクセストークン・リフレッシュトークンは `GOOGLE_TOKEN_ENCRYPTION_KEY` で暗号化して保存しています。キーが変わると再連携が必要です。

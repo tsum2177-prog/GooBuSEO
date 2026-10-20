@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { connection } from "next/server";
 import { redirect } from "next/navigation";
 import { GoogleConnectionCard } from "@/components/settings/google-connection-card";
 import { ShopSettingsForm } from "@/components/settings/shop-settings-form";
@@ -11,7 +10,7 @@ export const metadata: Metadata = {
   title: "店舗設定",
 };
 
-export const instant = false;
+export const dynamic = "force-dynamic";
 
 const googleMessages: Record<string, { text: string; className: string }> = {
   connected: {
@@ -43,8 +42,6 @@ export default async function SettingsPage({
   searchParams: Promise<{ google?: string }>;
 }) {
   const { google } = await searchParams;
-  await connection();
-
   const supabase = await createClient();
   const {
     data: { user },

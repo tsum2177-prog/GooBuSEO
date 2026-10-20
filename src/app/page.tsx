@@ -1,13 +1,8 @@
 import Link from "next/link";
-import { connection } from "next/server";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 
-export const instant = false;
-
 export default async function Home() {
-  await connection();
-
   const supabase = await createClient();
   const {
     data: { user },
