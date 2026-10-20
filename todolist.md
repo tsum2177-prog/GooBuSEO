@@ -14,6 +14,17 @@
 
 実装済みだが**外部サービスの設定が必要で未検証**のものが残っています。
 
+### 2026-10-20 追加実装（MVP必須3項目）
+
+| 項目 | 状態 |
+|---|---|
+| 店舗設定「業種」（AIプロンプト反映） | ✅ 実装済 |
+| 返信のON/Off切替（初期値OFF） | ✅ 実装済 |
+| 自動返信バッチ（取得→生成→自動投稿） | ✅ 実装済 |
+| 自動/手動の返信履歴の区別（`reviews.auto_replied`） | ✅ 実装済 |
+| `vercel.json` のcron設定（1時間ごと） | ✅ 追加済 |
+| **新マイグレーションの適用**（`category` / `auto_reply_enabled` / `auto_replied` 列） | ⬜ 要対応 |
+
 ---
 
 ## 1. Stripe（フェーズ2）— 決済フローの検証
@@ -55,6 +66,7 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 - [ ] 低評価（1〜3点）→ SEOキーワードが入らないこと
 - [ ] 高評価（4〜5点）→ 設定したSEOキーワードが自然に混入すること
 - [ ] キーワード未設定店舗でも自然な文章になること
+- [ ] 業種が設定されているとき、その業種に合った言い回しになること
 
 **完了条件**: 4点・2点のレビューで上記2条件を満たす返信が生成・投稿される
 
@@ -64,9 +76,12 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 - [ ] `CRON_SECRET` を `.env.local` に設定
 - [ ] `/api/reviews/sync` を `Authorization: Bearer <CRON_SECRET>` で定期実行
-  - Vercel Cron なら `vercel.json` に `{"crons":[{"path":"/api/reviews/sync","schedule":"0 * * * *"}]}` を追加
-  - ただしVercel CronはGETのみのため、`POST` → `GET` 対応が必要なら確認・修正する
+  - `vercel.json` に `{"crons":[{"path":"/api/reviews/sync","schedule":"0 * * * *"}]}` を追加済み（Vercel CronはGETで、`Authorization: Bearer $CRON_SECRET` を自動送信する）
+  - Vercel Hobbyプランは1日1回まで。1時間ごとの実行にはProプランが必要
 - [ ] 店舗ごとの取得頻度を決める（推奨: 1〜2時間ごと）
+- [ ] 自動返信ONの店舗で、取得→自動生成→自動投稿まで通ることを確認
+- [ ] 自動返信OFFの店舗では自動投稿されないことを確認
+- [ ] レビュー一覧で「AIが自動で作成した返信」/「AIが作成した返信」の表示が正しいこと
 
 ---
 

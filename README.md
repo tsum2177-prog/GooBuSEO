@@ -44,8 +44,9 @@ Supabase の **SQL Editor** で、`supabase/migrations/` 以下のファイル�
 2. `supabase/migrations/20261020120000_create_shop_settings.sql`（店舗設定テーブル・RLS）
 3. `supabase/migrations/20261020120100_create_reviews.sql`（レビュー履歴テーブル・RLS）
 4. `supabase/migrations/20261020120200_create_gbp_connections.sql`（Google連携トークン保存テーブル・RLS）
+5. `supabase/migrations/20261020120300_add_category_and_auto_reply.sql`（業種・自動返信ON/OFF・自動投稿フラグ）
 
-順番どおりに実行してください（`set_updated_at` 関数は1つ目が作ります）。実行後、Table Editor に `profiles` / `shop_settings` / `reviews` / `gbp_connections` の4テーブルがあることを確認できます。
+順番どおりに実行してください（`set_updated_at` 関数は1つ目が作ります）。実行後、最後の確認クエリのResultsに `shop_settings` の `category` / `auto_reply_enabled` と `reviews` の `auto_replied` が表示されていれば成功です。
 
 ### 4. Stripe設定（月額課金）
 
@@ -106,11 +107,13 @@ http://localhost:3000 を開く
 4. `npm run build` がエラーなく通ること
 5. ダッシュボードに「月額プラン」カードが表示され、ステータスが「未契約」バッジで見えること
 6. （Stripe設定後）「月額プランを契約する」→ Checkout画面 → テストカード決済 → `/dashboard?checkout=success` へ戻り、webhook反映後に「契約中」バッジへ変わること
-7. `/settings` で店舗名・強み・SEOキーワードを保存し、再読み込み後も保持されること
-8. `/reviews` が表示され、レビューが0件のときは空状態案内になること
-9. （Google設定後）`/settings` の「Googleマップと連携する」→ Googleの同意画面 → 戻ると店舗が「連携済み」になること
-10. 「レビューを取得する」でレビューが取得され、`/reviews` に表示されること
-11. 未返信のレビューで「AI返信を作成して投稿」→ Googleマップに返信が掲載され、レビュー一覧に「返信済み」と表示されること
+7. `/settings` で店舗名・業種・強み・SEOキーワードを保存し、再読み込み後も保持されること
+8. `/settings` の「自動返信をONにする」をONにして保存 → ダッシュボードの「自動返信 ON」バッジが変わること
+9. `/reviews` が表示され、レビューが0件のときは空状態案内になること
+10. （Google設定後）`/settings` の「Googleマップと連携する」→ Googleの同意画面 → 戻ると店舗が「連携済み」になること
+11. 「レビューを取得する」でレビューが取得され、`/reviews` に表示されること
+12. 未返信のレビューで「AI返信を作成して投稿」→ Googleマップに返信が掲載され、レビュー一覧に「返信済み」と表示されること
+13. 自動返信がONの状態でレビューを取得すると、自動で返信が生成・投稿され「AIが自動で作成した返信」と表示されること
 
 ## ディレクトリ構成
 
@@ -125,7 +128,8 @@ src/
 │   │   ├── oauth.ts         # OAuth2.0（認証URL・コード交換・トークン更新）
 │   │   ├── business.ts      # Business Profile API（店舗・レビュー取得・返信）
 │   │   ├── connections.ts   # 連携情報の保存とアクセストークン管理
-│   │   └── reviews.ts       # レビュー取得・DB同期
+│   │   ├── reviews.ts       # レビュー取得・DB同期
+│   │   └── auto-reply.ts    # 未返信レビューの自動生成・自動投稿
 │   ├── supabase/
 │   │   ├── client.ts        # ブラウザ用クライアント
 │   │   ├── server.ts        # サーバー用クライアント
@@ -155,7 +159,8 @@ supabase/migrations/         # DBマイグレーションSQL
 
 ## 運用メモ
 
-- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得する場合は `/api/reviews/sync` を `Authorization: Bearer <CRON_SECRET>` で定期実行（Vercel Cronなど）してください。
+- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得する場合は `/api/reviews/sync` を `Authorization: Bearer <CRON_SECRET>` で定期実行（Vercel Cronの場合は `vercel.json` の設定がそのまま使われます）してください。
+- **自動返信**: `/settings` の「自動返信をONにする」がONの店舗だけ、取得したレビューへ自動で返信を投稿します（初期値はOFF）。手動で投稿したものは「AIが作成した返信」、自動のものは「AIが自動で作成した返信」と表示されます。
 - **AI返信の投稿**: 低評価（1〜3点）は「謝罪・改善案のみ、SEOキーワードは入れない」、高評価（4〜5点）は「感謝 + SEOキーワードを自然に盛り込み」。生成した文はそのままGoogleマップへ投稿されます。
 - **トークン管理**: Googleのアクセストークン・リフレッシュトークンは `GOOGLE_TOKEN_ENCRYPTION_KEY` で暗号化して保存しています。キーが変わると再連携が必要です。
 
