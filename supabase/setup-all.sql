@@ -1,0 +1,164 @@
+-- ============================================================
+-- レビュー返信AI セットアップSQL（Supabase SQL Editor用）
+-- migrations/ 以下のファイルを順番に連結したものです。
+-- 修正は migrations/ 側で行い、このファイルは再生成してください。
+-- 実行後、Table Editor に profiles / shop_settings / reviews /
+-- gbp_connections の4テーブルができることを確認してください。
+-- ============================================================
+
+-- ---------- 20261019120000_create_profiles.sql ----------
+create table if not exists public.profiles (
+  id uuid primary key references auth.users (id) on delete cascade,
+  email text,
+  subscription_status text not null default 'none'
+    check (subscription_status in ('none', 'active', 'past_due', 'canceled')),
+  stripe_customer_id text unique,
+  stripe_price_id text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.profiles enable row level security;
+
+create policy "profiles_select_own"
+  on public.profiles
+  for select
+  using (auth.uid() = id);
+
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.profiles (id, email)
+  values (new.id, new.email)
+  on conflict (id) do update set email = excluded.email;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row
+  execute function public.handle_new_user();
+
+create or replace function public.set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists profiles_set_updated_at on public.profiles;
+create trigger profiles_set_updated_at
+  before update on public.profiles
+  for each row
+  execute function public.set_updated_at();
+
+
+-- ---------- 20261020120000_create_shop_settings.sql ----------
+-- 店舗設定（自店舗の強み・SEOキーワード）
+create table if not exists public.shop_settings (
+  id uuid primary key references auth.users (id) on delete cascade,
+  shop_name text,
+  strengths text not null default '',
+  seo_keywords text[] not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+alter table public.shop_settings enable row level security;
+
+create policy "shop_settings_select_own"
+  on public.shop_settings
+  for select
+  using (auth.uid() = id);
+
+create policy "shop_settings_insert_own"
+  on public.shop_settings
+  for insert
+  with check (auth.uid() = id);
+
+create policy "shop_settings_update_own"
+  on public.shop_settings
+  for update
+  using (auth.uid() = id)
+  with check (auth.uid() = id);
+
+drop trigger if exists shop_settings_set_updated_at on public.shop_settings;
+create trigger shop_settings_set_updated_at
+  before update on public.shop_settings
+  for each row
+  execute function public.set_updated_at();
+
+
+-- ---------- 20261020120100_create_reviews.sql ----------
+-- レビュー履歴（Googleマップから取得した口コミ）
+create table if not exists public.reviews (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  location_id text,
+  external_id text not null,
+  author_name text,
+  rating integer not null check (rating between 1 and 5),
+  content text,
+  published_at timestamptz,
+  reply_text text,
+  replied_at timestamptz,
+  created_at timestamptz not null default now(),
+  unique (user_id, external_id)
+);
+
+alter table public.reviews enable row level security;
+
+create policy "reviews_select_own"
+  on public.reviews
+  for select
+  using (auth.uid() = user_id);
+
+create index if not exists reviews_user_id_published_at_idx
+  on public.reviews (user_id, published_at desc);
+
+
+-- ---------- 20261020120200_create_gbp_connections.sql ----------
+-- Google Business Profile連携（OAuthトークンの保存先）
+create table if not exists public.gbp_connections (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users (id) on delete cascade,
+  google_account_id text not null,
+  google_account_name text,
+  location_id text not null,
+  location_title text,
+  access_token text not null,
+  refresh_token text not null,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, location_id)
+);
+
+alter table public.gbp_connections enable row level security;
+
+create policy "gbp_connections_select_own"
+  on public.gbp_connections
+  for select
+  using (auth.uid() = user_id);
+
+create policy "gbp_connections_delete_own"
+  on public.gbp_connections
+  for delete
+  using (auth.uid() = user_id);
+
+drop trigger if exists gbp_connections_set_updated_at on public.gbp_connections;
+create trigger gbp_connections_set_updated_at
+  before update on public.gbp_connections
+  for each row
+  execute function public.set_updated_at();
+
+
