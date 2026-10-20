@@ -1,4 +1,5 @@
 import { Star } from "lucide-react";
+import { ReplyButton } from "@/components/reviews/reply-button";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -95,6 +96,7 @@ export function ReviewList({ reviews }: { reviews: ReviewItem[] }) {
                     <p className="text-sm leading-relaxed">{review.reply_text}</p>
                   </div>
                 )}
+                {!replied && <ReplyButton reviewId={review.id} />}
               </CardContent>
             </Card>
           </li>

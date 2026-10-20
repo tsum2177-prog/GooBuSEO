@@ -2,7 +2,10 @@
 
 import { useActionState, useState } from "react";
 import { Plus, X } from "lucide-react";
-import { saveShopSettings, type ShopSettingsState } from "@/app/(app)/settings/actions";
+import {
+  saveShopSettings,
+  type SettingsActionState,
+} from "@/app/(app)/settings/actions";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -17,7 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 
 const MAX_KEYWORDS = 20;
 
-const initialState: ShopSettingsState = { status: "success", message: "" };
+const initialState: SettingsActionState = { status: "success", message: "" };
 
 export function ShopSettingsForm({
   initial,
