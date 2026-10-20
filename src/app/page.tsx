@@ -1,10 +1,13 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 
 export const instant = false;
 
 export default async function Home() {
+  await connection();
+
   const supabase = await createClient();
   const {
     data: { user },
@@ -24,17 +27,18 @@ export default async function Home() {
         </p>
         <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
           {user ? (
-            <Button size="lg" render={<Link href="/dashboard" />}>
+            <Button size="lg" nativeButton={false} render={<Link href="/dashboard" />}>
               ダッシュボードへ
             </Button>
           ) : (
             <>
-              <Button size="lg" render={<Link href="/signup" />}>
+              <Button size="lg" nativeButton={false} render={<Link href="/signup" />}>
                 無料で始める
               </Button>
               <Button
                 size="lg"
                 variant="outline"
+                nativeButton={false}
                 render={<Link href="/login" />}
               >
                 ログイン

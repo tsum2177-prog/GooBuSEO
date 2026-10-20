@@ -134,7 +134,11 @@ export default async function DashboardPage({
                   ))}
                 </ul>
               )}
-              <Button variant="outline" render={<Link href="/settings" />}>
+              <Button
+                variant="outline"
+                nativeButton={false}
+                render={<Link href="/settings" />}
+              >
                 店舗設定を編集
               </Button>
             </>
@@ -143,7 +147,7 @@ export default async function DashboardPage({
               <p className="text-sm text-muted-foreground">
                 店舗情報を登録すると、AIの返信文に店舗の強みやキーワードを反映できます。
               </p>
-              <Button render={<Link href="/settings" />}>
+              <Button nativeButton={false} render={<Link href="/settings" />}>
                 店舗設定を登録する
               </Button>
             </>
