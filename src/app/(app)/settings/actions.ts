@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { deleteConnection } from "@/lib/google/connections";
+import { autoReplyPendingReviews } from "@/lib/google/auto-reply";
 import { syncReviews } from "@/lib/google/reviews";
 import { createClient } from "@/lib/supabase/server";
 
@@ -26,6 +27,9 @@ export async function saveShopSettings(
   const shopName = String(formData.get("shop_name") ?? "")
     .trim()
     .slice(0, 100);
+  const category = String(formData.get("category") ?? "")
+    .trim()
+    .slice(0, 50);
   const strengths = String(formData.get("strengths") ?? "")
     .trim()
     .slice(0, 2000);
@@ -34,13 +38,16 @@ export async function saveShopSettings(
     .map((keyword) => keyword.trim())
     .filter(Boolean)
     .slice(0, MAX_KEYWORDS);
+  const autoReplyEnabled = formData.get("auto_reply_enabled") === "on";
 
   const { error } = await supabase.from("shop_settings").upsert(
     {
       id: user.id,
       shop_name: shopName || null,
+      category: category || null,
       strengths,
       seo_keywords: seoKeywords,
+      auto_reply_enabled: autoReplyEnabled,
     },
     { onConflict: "id" }
   );
@@ -67,6 +74,7 @@ export async function syncReviewsAction(): Promise<SettingsActionState> {
 
   try {
     const { imported, locations } = await syncReviews(user.id);
+    const auto = await autoReplyPendingReviews(user.id);
     revalidatePath("/reviews");
     revalidatePath("/dashboard");
 
@@ -79,7 +87,9 @@ export async function syncReviewsAction(): Promise<SettingsActionState> {
 
     return {
       status: "success",
-      message: `${locations}件の店舗から${imported}件のレビューを取得しました。`,
+      message:
+        `${locations}件の店舗から${imported}件のレビューを取得しました。` +
+        (auto.replied > 0 ? `自動返信を${auto.replied}件投稿しました。` : ""),
     };
   } catch (error) {
     console.error("review sync failed", error);

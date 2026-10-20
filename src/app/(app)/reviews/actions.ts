@@ -82,6 +82,7 @@ export async function generateAndPostReply(
       .update({
         reply_text: replyText,
         replied_at: new Date().toISOString(),
+        auto_replied: false,
       })
       .eq("id", review.id)
       .eq("user_id", user.id);

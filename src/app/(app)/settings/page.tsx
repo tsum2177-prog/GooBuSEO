@@ -51,7 +51,9 @@ export default async function SettingsPage({
   const [{ data: settings }, connections] = await Promise.all([
     supabase
       .from("shop_settings")
-      .select("shop_name, strengths, seo_keywords")
+      .select(
+        "shop_name, category, strengths, seo_keywords, auto_reply_enabled"
+      )
       .eq("id", user.id)
       .maybeSingle(),
     listConnections(user.id).catch(() => []),
@@ -85,8 +87,10 @@ export default async function SettingsPage({
       <ShopSettingsForm
         initial={{
           shopName: settings?.shop_name ?? "",
+          category: settings?.category ?? "",
           strengths: settings?.strengths ?? "",
           seoKeywords: settings?.seo_keywords ?? [],
+          autoReplyEnabled: settings?.auto_reply_enabled ?? false,
         }}
       />
     </div>

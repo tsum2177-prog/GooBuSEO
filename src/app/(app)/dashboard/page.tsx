@@ -66,7 +66,9 @@ export default async function DashboardPage({
         .maybeSingle(),
       supabase
         .from("shop_settings")
-        .select("shop_name, strengths, seo_keywords")
+        .select(
+          "shop_name, category, strengths, seo_keywords, auto_reply_enabled"
+        )
         .eq("id", user.id)
         .maybeSingle(),
       supabase
@@ -80,6 +82,7 @@ export default async function DashboardPage({
   const status = parseStatus(profile?.subscription_status);
   const message = checkout ? checkoutMessages[checkout] : undefined;
   const keywords: string[] = settings?.seo_keywords ?? [];
+  const autoReplyEnabled = Boolean(settings?.auto_reply_enabled);
   const isConfigured = Boolean(settings?.shop_name || settings?.strengths || keywords.length);
 
   return (
@@ -134,6 +137,12 @@ export default async function DashboardPage({
                   ))}
                 </ul>
               )}
+              <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                <Badge variant={autoReplyEnabled ? "default" : "outline"}>
+                  自動返信 {autoReplyEnabled ? "ON" : "OFF"}
+                </Badge>
+                {settings?.category && <span>業種: {settings.category}</span>}
+              </div>
               <Button
                 variant="outline"
                 nativeButton={false}

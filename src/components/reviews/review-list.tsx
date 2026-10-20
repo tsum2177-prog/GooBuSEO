@@ -18,6 +18,7 @@ export type ReviewItem = {
   published_at: string | null;
   reply_text: string | null;
   replied_at: string | null;
+  auto_replied: boolean;
   created_at: string;
 };
 
@@ -91,7 +92,7 @@ export function ReviewList({ reviews }: { reviews: ReviewItem[] }) {
                 {review.reply_text && (
                   <div className="space-y-1 border-l-2 border-border pl-3">
                     <p className="text-xs font-medium text-muted-foreground">
-                      AIが作成した返信
+                      {review.auto_replied ? "AIが自動で作成した返信" : "AIが作成した返信"}
                     </p>
                     <p className="text-sm leading-relaxed">{review.reply_text}</p>
                   </div>

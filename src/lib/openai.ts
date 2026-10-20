@@ -7,6 +7,7 @@ export type ReplyInput = {
   reviewText: string;
   reviewerName?: string | null;
   shopName?: string | null;
+  category?: string | null;
   strengths?: string | null;
   seoKeywords: string[];
 };
@@ -30,6 +31,7 @@ function buildSystemPrompt(isLowRating: boolean): string {
   }
 
   rules.push(
+    "返信文は、その業種に合った言い回しにしてください。",
     "200〜300字程度の1段落で、丁寧語を使って店舗側の立場で書いてください。",
     "説明文や記号、Markdownは不要です。返信文のみを出力してください。"
   );
@@ -48,6 +50,7 @@ export async function generateReply(input: ReplyInput): Promise<string> {
 
   const userPrompt = [
     `【店舗名】${input.shopName ?? "店舗名未設定"}`,
+    `【業種】${input.category ?? "未設定"}`,
     `【店舗の特徴】${input.strengths ?? "未設定"}`,
     `【SEOキーワード】${keywords.length > 0 ? keywords.join("、") : "なし"}`,
     `【評価】${input.rating}点`,

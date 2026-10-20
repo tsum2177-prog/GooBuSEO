@@ -183,12 +183,29 @@ create trigger gbp_connections_set_updated_at
 commit;
 
 
+-- ---------- 20261020120300_add_category_and_auto_reply.sql ----------
+-- 店舗設定の拡張（業種・自動返信の有効/無効）と、返信の自動投稿フラグ
+begin;
+
+alter table public.shop_settings
+  add column if not exists category text;
+
+alter table public.shop_settings
+  add column if not exists auto_reply_enabled boolean not null default false;
+
+alter table public.reviews
+  add column if not exists auto_replied boolean not null default false;
+
+commit;
+
+
 
 -- ============================================================
--- 実行結果の確認（下の4行が表示されれば成功です）
+-- 実行結果の確認（shop_settings に category / auto_reply_enabled、
+-- reviews に auto_replied が表示されていれば成功です）
 -- ============================================================
-select table_name
-from information_schema.tables
+select table_name, column_name
+from information_schema.columns
 where table_schema = 'public'
   and table_name in ('profiles', 'shop_settings', 'reviews', 'gbp_connections')
-order by table_name;
+order by table_name, column_name;

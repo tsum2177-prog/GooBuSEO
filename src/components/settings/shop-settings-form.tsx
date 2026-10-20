@@ -16,9 +16,27 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
 const MAX_KEYWORDS = 20;
+
+const categories = [
+  "飲食店",
+  "居酒屋・バー",
+  "喫茶店・カフェ",
+  "美容院・理容店",
+  "歯科医院・クリニック",
+  "ホテル・旅館",
+  "その他",
+];
 
 const initialState: SettingsActionState = { status: "success", message: "" };
 
@@ -27,8 +45,10 @@ export function ShopSettingsForm({
 }: {
   initial: {
     shopName: string;
+    category: string;
     strengths: string;
     seoKeywords: string[];
+    autoReplyEnabled: boolean;
   };
 }) {
   const [state, formAction, pending] = useActionState(
@@ -37,6 +57,10 @@ export function ShopSettingsForm({
   );
   const [keywords, setKeywords] = useState<string[]>(initial.seoKeywords);
   const [draft, setDraft] = useState("");
+  const [category, setCategory] = useState(initial.category);
+  const [autoReplyEnabled, setAutoReplyEnabled] = useState(
+    initial.autoReplyEnabled
+  );
 
   function addKeyword() {
     const value = draft.trim();
@@ -57,20 +81,41 @@ export function ShopSettingsForm({
     <form action={formAction} className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>店舗名</CardTitle>
+          <CardTitle>店舗情報</CardTitle>
           <CardDescription>
-            AIが返信文を作るときに使われる店舗名です
+            AIが返信文を作るときに使われる店舗名と業種です
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-2">
-          <Label htmlFor="shop_name">店舗名</Label>
-          <Input
-            id="shop_name"
-            name="shop_name"
-            defaultValue={initial.shopName}
-            placeholder="例: 炭火焼肉 ambi"
-            maxLength={100}
-          />
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="shop_name">店舗名</Label>
+            <Input
+              id="shop_name"
+              name="shop_name"
+              defaultValue={initial.shopName}
+              placeholder="例: 炭火焼肉 ambi"
+              maxLength={100}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="category_select">業種</Label>
+            <Select
+              value={category || null}
+              onValueChange={(value) => setCategory(value ?? "")}
+            >
+              <SelectTrigger id="category_select" className="w-full">
+                <SelectValue placeholder="業種を選択してください" />
+              </SelectTrigger>
+              <SelectContent>
+                {categories.map((item) => (
+                  <SelectItem key={item} value={item}>
+                    {item}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <input type="hidden" name="category" value={category} />
+          </div>
         </CardContent>
       </Card>
 
@@ -154,6 +199,39 @@ export function ShopSettingsForm({
               まだキーワードがありません。例: 新宿、焼肉、個室
             </p>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>自動返信</CardTitle>
+          <CardDescription>
+            新しく取得したレビューへ自動で返信するかどうか
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <Label htmlFor="auto_reply_switch">自動返信をONにする</Label>
+              <p className="text-sm text-muted-foreground">
+                ONにすると、取得したレビューに自動で返信を投稿します。
+                OFFの場合でも、レビュー一覧から手動で投稿できます。
+              </p>
+            </div>
+            <Switch
+              id="auto_reply_switch"
+              checked={autoReplyEnabled}
+              onCheckedChange={(checked) => setAutoReplyEnabled(checked)}
+            />
+          </div>
+          <input
+            type="hidden"
+            name="auto_reply_enabled"
+            value={autoReplyEnabled ? "on" : "off"}
+          />
+          <p className="text-xs text-muted-foreground">
+            自動返信は店舗名義の公開レビューとして投稿され、外からご覧いただけます。
+          </p>
         </CardContent>
       </Card>
 
