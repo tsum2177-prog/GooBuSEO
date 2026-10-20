@@ -1,4 +1,6 @@
 -- Google Business Profile連携（OAuthトークンの保存先）
+begin;
+
 create table if not exists public.gbp_connections (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
@@ -16,11 +18,13 @@ create table if not exists public.gbp_connections (
 
 alter table public.gbp_connections enable row level security;
 
+drop policy if exists "gbp_connections_select_own" on public.gbp_connections;
 create policy "gbp_connections_select_own"
   on public.gbp_connections
   for select
   using (auth.uid() = user_id);
 
+drop policy if exists "gbp_connections_delete_own" on public.gbp_connections;
 create policy "gbp_connections_delete_own"
   on public.gbp_connections
   for delete
@@ -31,3 +35,5 @@ create trigger gbp_connections_set_updated_at
   before update on public.gbp_connections
   for each row
   execute function public.set_updated_at();
+
+commit;

@@ -2,8 +2,9 @@
 -- レビュー返信AI セットアップSQL（Supabase SQL Editor用）
 -- migrations/ 以下のファイルを順番に連結したものです。
 -- 修正は migrations/ 側で行い、このファイルは再生成してください。
--- 実行後、Table Editor に profiles / shop_settings / reviews /
--- gbp_connections の4テーブルができることを確認してください。
+--
+-- 使い方: Supabase ダッシュボード > SQL Editor > New query に貼り付けて Run
+-- 同じスクリプトは何度実行してもエラーになりません（drop policy if exists / create table if not exists を使用）。
 -- ============================================================
 
 -- ---------- 20261019120000_create_profiles.sql ----------
@@ -20,6 +21,7 @@ create table if not exists public.profiles (
 
 alter table public.profiles enable row level security;
 
+drop policy if exists "profiles_select_own" on public.profiles;
 create policy "profiles_select_own"
   on public.profiles
   for select
@@ -48,6 +50,7 @@ create trigger on_auth_user_created
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
+set search_path = public
 as $$
 begin
   new.updated_at = now();
@@ -64,6 +67,8 @@ create trigger profiles_set_updated_at
 
 -- ---------- 20261020120000_create_shop_settings.sql ----------
 -- 店舗設定（自店舗の強み・SEOキーワード）
+begin;
+
 create table if not exists public.shop_settings (
   id uuid primary key references auth.users (id) on delete cascade,
   shop_name text,
@@ -75,16 +80,19 @@ create table if not exists public.shop_settings (
 
 alter table public.shop_settings enable row level security;
 
+drop policy if exists "shop_settings_select_own" on public.shop_settings;
 create policy "shop_settings_select_own"
   on public.shop_settings
   for select
   using (auth.uid() = id);
 
+drop policy if exists "shop_settings_insert_own" on public.shop_settings;
 create policy "shop_settings_insert_own"
   on public.shop_settings
   for insert
   with check (auth.uid() = id);
 
+drop policy if exists "shop_settings_update_own" on public.shop_settings;
 create policy "shop_settings_update_own"
   on public.shop_settings
   for update
@@ -97,9 +105,13 @@ create trigger shop_settings_set_updated_at
   for each row
   execute function public.set_updated_at();
 
+commit;
+
 
 -- ---------- 20261020120100_create_reviews.sql ----------
 -- レビュー履歴（Googleマップから取得した口コミ）
+begin;
+
 create table if not exists public.reviews (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
@@ -117,6 +129,7 @@ create table if not exists public.reviews (
 
 alter table public.reviews enable row level security;
 
+drop policy if exists "reviews_select_own" on public.reviews;
 create policy "reviews_select_own"
   on public.reviews
   for select
@@ -125,9 +138,13 @@ create policy "reviews_select_own"
 create index if not exists reviews_user_id_published_at_idx
   on public.reviews (user_id, published_at desc);
 
+commit;
+
 
 -- ---------- 20261020120200_create_gbp_connections.sql ----------
 -- Google Business Profile連携（OAuthトークンの保存先）
+begin;
+
 create table if not exists public.gbp_connections (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users (id) on delete cascade,
@@ -145,11 +162,13 @@ create table if not exists public.gbp_connections (
 
 alter table public.gbp_connections enable row level security;
 
+drop policy if exists "gbp_connections_select_own" on public.gbp_connections;
 create policy "gbp_connections_select_own"
   on public.gbp_connections
   for select
   using (auth.uid() = user_id);
 
+drop policy if exists "gbp_connections_delete_own" on public.gbp_connections;
 create policy "gbp_connections_delete_own"
   on public.gbp_connections
   for delete
@@ -161,4 +180,15 @@ create trigger gbp_connections_set_updated_at
   for each row
   execute function public.set_updated_at();
 
+commit;
 
+
+
+-- ============================================================
+-- 実行結果の確認（下の4行が表示されれば成功です）
+-- ============================================================
+select table_name
+from information_schema.tables
+where table_schema = 'public'
+  and table_name in ('profiles', 'shop_settings', 'reviews', 'gbp_connections')
+order by table_name;
