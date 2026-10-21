@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
+import { SubscriptionNotice } from "@/components/billing/subscription-notice";
 import { ReviewList, type ReviewItem } from "@/components/reviews/review-list";
+import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -16,16 +18,26 @@ export default async function ReviewsPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const { data, error } = await supabase
-    .from("reviews")
-    .select(
-      "id, author_name, rating, content, published_at, reply_text, replied_at, auto_replied, created_at"
-    )
-    .eq("user_id", user.id)
-    .order("published_at", { ascending: false, nullsFirst: false })
-    .limit(50);
+  const [{ data, error }, { data: profile }] = await Promise.all([
+    supabase
+      .from("reviews")
+      .select(
+        "id, author_name, rating, content, published_at, reply_text, replied_at, auto_replied, created_at"
+      )
+      .eq("user_id", user.id)
+      .order("published_at", { ascending: false, nullsFirst: false })
+      .limit(50),
+    supabase
+      .from("profiles")
+      .select("subscription_status")
+      .eq("id", user.id)
+      .maybeSingle(),
+  ]);
 
   const reviews = (data ?? []) as ReviewItem[];
+  const canReply = isAccessibleStatus(
+    parseSubscriptionStatus(profile?.subscription_status)
+  );
 
   return (
     <div className="space-y-6">
@@ -35,6 +47,7 @@ export default async function ReviewsPage() {
           Googleマップから取得したレビューと、送信済みの返信です。
         </p>
       </div>
+      {!canReply && <SubscriptionNotice />}
       {error ? (
         <p
           role="alert"
@@ -43,7 +56,7 @@ export default async function ReviewsPage() {
           レビューを取得できませんでした。データベースの設定を確認してください。
         </p>
       ) : (
-        <ReviewList reviews={reviews} />
+        <ReviewList reviews={reviews} canReply={canReply} />
       )}
     </div>
   );

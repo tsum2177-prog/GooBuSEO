@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { PlanCard, type SubscriptionStatus } from "@/components/billing/plan-card";
+import { PlanCard } from "@/components/billing/plan-card";
 import { StarRating } from "@/components/reviews/review-list";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -12,6 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -38,12 +39,6 @@ const checkoutMessages: Record<
     className: "border-destructive/30 bg-destructive/10 text-destructive",
   },
 };
-
-function parseStatus(value: unknown): SubscriptionStatus {
-  return value === "active" || value === "past_due" || value === "canceled"
-    ? value
-    : "none";
-}
 
 export default async function DashboardPage({
   searchParams,
@@ -79,7 +74,7 @@ export default async function DashboardPage({
         .limit(3),
     ]);
 
-  const status = parseStatus(profile?.subscription_status);
+  const status = parseSubscriptionStatus(profile?.subscription_status);
   const message = checkout ? checkoutMessages[checkout] : undefined;
   const keywords: string[] = settings?.seo_keywords ?? [];
   const autoReplyEnabled = Boolean(settings?.auto_reply_enabled);
@@ -200,7 +195,9 @@ export default async function DashboardPage({
             </ul>
           ) : (
             <p className="text-sm text-muted-foreground">
-              まだレビューがありません。Googleマップ連携が完了すると自動で取得します。
+              {isAccessibleStatus(status)
+                ? "まだレビューがありません。Googleマップ連携が完了すると自動で取得します。"
+                : "まだレビューがありません。月額プランのご契約とGoogleマップ連携が完了すると、自動で取得します。"}
             </p>
           )}
         </CardContent>

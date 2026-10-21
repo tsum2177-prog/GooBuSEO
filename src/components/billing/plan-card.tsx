@@ -9,10 +9,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { getStripe, isStripeConfigured } from "@/lib/stripe";
+import type { SubscriptionStatus } from "@/lib/billing";
+import { fetchPriceLabel, isStripeConfigured } from "@/lib/stripe";
 import type { VariantProps } from "class-variance-authority";
 
-export type SubscriptionStatus = "none" | "active" | "past_due" | "canceled";
+export type { SubscriptionStatus };
 
 type BadgeVariant = NonNullable<
   VariantProps<typeof badgeVariants>["variant"]
@@ -27,26 +28,6 @@ const statusMeta: Record<
   past_due: { label: "支払いエラー", variant: "destructive" },
   canceled: { label: "解約済み", variant: "outline" },
 };
-
-async function fetchPriceLabel(): Promise<string | null> {
-  const stripe = getStripe();
-  if (!stripe || !process.env.STRIPE_PRICE_ID) return null;
-
-  try {
-    const price = await stripe.prices.retrieve(process.env.STRIPE_PRICE_ID);
-    if (price.unit_amount == null) return null;
-    const value =
-      price.currency.toLowerCase() === "jpy"
-        ? price.unit_amount
-        : price.unit_amount / 100;
-    return new Intl.NumberFormat("ja-JP", {
-      style: "currency",
-      currency: price.currency.toUpperCase(),
-    }).format(value);
-  } catch {
-    return null;
-  }
-}
 
 export async function PlanCard({
   status,

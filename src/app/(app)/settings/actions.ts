@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { isSubscribed, SUBSCRIPTION_REQUIRED_MESSAGE } from "@/lib/billing";
 import { deleteConnection } from "@/lib/google/connections";
 import { autoReplyPendingReviews } from "@/lib/google/auto-reply";
 import { syncReviews } from "@/lib/google/reviews";
@@ -71,6 +72,10 @@ export async function syncReviewsAction(): Promise<SettingsActionState> {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
+
+  if (!(await isSubscribed(user.id))) {
+    return { status: "error", message: SUBSCRIPTION_REQUIRED_MESSAGE };
+  }
 
   try {
     const { imported, locations } = await syncReviews(user.id);

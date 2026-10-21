@@ -1,4 +1,6 @@
 import { generateReply, isAiConfigured } from "@/lib/ai";
+import { isSubscribed } from "@/lib/billing";
+import { claimReviews, releaseReviewClaim } from "@/lib/review-claims";
 import { replyToReview } from "./business";
 import { getValidAccessToken, listConnections } from "./connections";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -7,6 +9,11 @@ export async function autoReplyPendingReviews(userId: string): Promise<{
   replied: number;
   skipped: number;
 }> {
+  // AI返信の生成と投稿は月額サブスクリプションの。未契約なら何もしない
+  if (!(await isSubscribed(userId))) {
+    return { replied: 0, skipped: 0 };
+  }
+
   const admin = createAdminClient();
 
   const { data: settings } = await admin
@@ -34,10 +41,14 @@ export async function autoReplyPendingReviews(userId: string): Promise<{
     return { replied: 0, skipped: 0 };
   }
 
+  // 同時に走った実行と対象が重ならないよう、排他的に確保する
+  const claimedIds = new Set(await claimReviews(userId, pending.map((row) => row.id)));
+  const targets = pending.filter((row) => claimedIds.has(row.id));
+
   const connections = await listConnections(userId);
   let replied = 0;
 
-  for (const review of pending) {
+  for (const review of targets) {
     const connection = connections.find(
       (item) => item.location_id === review.location_id
     );
@@ -69,6 +80,7 @@ export async function autoReplyPendingReviews(userId: string): Promise<{
       replied += 1;
     } catch (error) {
       console.error("auto reply failed for review", review.id, error);
+      await releaseReviewClaim(review.id);
     }
   }
 

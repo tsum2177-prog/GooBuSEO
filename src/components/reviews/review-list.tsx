@@ -48,7 +48,13 @@ function formatDate(value: string | null): string {
   return new Intl.DateTimeFormat("ja-JP", { dateStyle: "medium" }).format(date);
 }
 
-export function ReviewList({ reviews }: { reviews: ReviewItem[] }) {
+export function ReviewList({
+  reviews,
+  canReply = true,
+}: {
+  reviews: ReviewItem[];
+  canReply?: boolean;
+}) {
   if (reviews.length === 0) {
     return (
       <Card>
@@ -97,7 +103,14 @@ export function ReviewList({ reviews }: { reviews: ReviewItem[] }) {
                     <p className="text-sm leading-relaxed">{review.reply_text}</p>
                   </div>
                 )}
-                {!replied && <ReplyButton reviewId={review.id} />}
+                {!replied &&
+                  (canReply ? (
+                    <ReplyButton reviewId={review.id} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      月額プランのご契約後、返信を投稿できます。
+                    </p>
+                  ))}
               </CardContent>
             </Card>
           </li>

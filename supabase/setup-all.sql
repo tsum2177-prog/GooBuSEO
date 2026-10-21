@@ -200,9 +200,41 @@ commit;
 
 
 
+-- ---------- 20261020120400_add_claim_and_preserve_reply.sql ----------
+-- 自動返信の排他制御（claimed_at）と、返信履歴の保持トリガーを追加
+begin;
+
+alter table public.reviews
+  add column if not exists claimed_at timestamptz;
+
+create index if not exists reviews_user_id_claimed_at_idx
+  on public.reviews (user_id, claimed_at);
+
+create or replace function public.preserve_review_reply()
+returns trigger
+language plpgsql
+as $$
+begin
+  if old.reply_text is not null and new.reply_text is null then
+    new.reply_text = old.reply_text;
+    new.replied_at = old.replied_at;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists reviews_preserve_reply on public.reviews;
+create trigger reviews_preserve_reply
+  before update on public.reviews
+  for each row
+  execute function public.preserve_review_reply();
+
+commit;
+
+
 -- ============================================================
 -- 実行結果の確認（shop_settings に category / auto_reply_enabled、
--- reviews に auto_replied が表示されていれば成功です）
+-- reviews に auto_replied / claimed_at が表示されていれば成功です）
 -- ============================================================
 select table_name, column_name
 from information_schema.columns

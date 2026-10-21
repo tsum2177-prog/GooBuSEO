@@ -1,27 +1,8 @@
 import { NextResponse } from "next/server";
 import type Stripe from "stripe";
+import { mapStripeSubscriptionStatus } from "@/lib/billing";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getStripe } from "@/lib/stripe";
-
-type SubscriptionStatus = "none" | "active" | "past_due" | "canceled";
-
-function mapSubscriptionStatus(
-  status: Stripe.Subscription.Status
-): SubscriptionStatus {
-  switch (status) {
-    case "active":
-    case "trialing":
-      return "active";
-    case "past_due":
-    case "unpaid":
-      return "past_due";
-    case "canceled":
-    case "incomplete_expired":
-      return "canceled";
-    default:
-      return "none";
-  }
-}
 
 function customerIdOf(
   customer: string | Stripe.Customer | Stripe.DeletedCustomer | null
@@ -73,6 +54,11 @@ export async function POST(request: Request) {
           if (session.customer_details?.email) {
             row.email = session.customer_details.email;
           }
+          // 支払いが完了していれば、この時点で契約状態を更新しておく。
+          // subscription イベントが遅れても「未契約」のままにならないようにするため。
+          if (session.payment_status === "paid") {
+            row.subscription_status = "active";
+          }
           await admin.from("profiles").upsert(row, { onConflict: "id" });
         }
         break;
@@ -85,7 +71,7 @@ export async function POST(request: Request) {
         const status =
           event.type === "customer.subscription.deleted"
             ? "canceled"
-            : mapSubscriptionStatus(subscription.status);
+            : mapStripeSubscriptionStatus(subscription.status);
         const patch: Record<string, unknown> = {
           subscription_status: status,
           stripe_price_id: subscription.items.data[0]?.price.id ?? null,

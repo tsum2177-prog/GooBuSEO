@@ -3,8 +3,13 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { generateReply, isAiConfigured } from "@/lib/ai";
+import {
+  isSubscribed,
+  SUBSCRIPTION_REQUIRED_MESSAGE,
+} from "@/lib/billing";
 import { replyToReview } from "@/lib/google/business";
 import { getValidAccessToken, listConnections } from "@/lib/google/connections";
+import { claimReviews, releaseReviewClaim } from "@/lib/review-claims";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
@@ -28,15 +33,28 @@ export async function generateAndPostReply(
     return { status: "error", message: "対象のレビューが指定されていません。" };
   }
 
+  if (!(await isSubscribed(user.id))) {
+    return { status: "error", message: SUBSCRIPTION_REQUIRED_MESSAGE };
+  }
+
   const { data: review } = await supabase
     .from("reviews")
-    .select("id, location_id, external_id, author_name, rating, content")
+    .select(
+      "id, location_id, external_id, author_name, rating, content, reply_text"
+    )
     .eq("id", reviewId)
     .eq("user_id", user.id)
     .maybeSingle();
 
   if (!review) {
     return { status: "error", message: "レビューが見つかりませんでした。" };
+  }
+
+  if (review.reply_text) {
+    return {
+      status: "error",
+      message: "このレビューには既に返信しています。",
+    };
   }
 
   if (!isAiConfigured()) {
@@ -46,21 +64,30 @@ export async function generateAndPostReply(
     };
   }
 
-  try {
-    const connections = await listConnections(user.id);
-    const connection = connections.find(
-      (item) => item.location_id === review.location_id
-    );
-    if (!connection) {
-      return {
-        status: "error",
-        message: "Googleマップがまだ連携されていません。先に連携してください。",
-      };
-    }
+  const connections = await listConnections(user.id);
+  const connection = connections.find(
+    (item) => item.location_id === review.location_id
+  );
+  if (!connection) {
+    return {
+      status: "error",
+      message: "Googleマップがまだ連携されていません。先に連携してください。",
+    };
+  }
 
+  // 同時に走った自動処理と対象が重ならないよう、排他的に確保する
+  const claimedIds = await claimReviews(user.id, [review.id]);
+  if (!claimedIds.includes(review.id)) {
+    return {
+      status: "error",
+      message: "他の処理が進行中です。しばらくしてから再度お試しください。",
+    };
+  }
+
+  try {
     const { data: settings } = await supabase
       .from("shop_settings")
-      .select("shop_name, strengths, seo_keywords")
+      .select("shop_name, category, strengths, seo_keywords")
       .eq("id", user.id)
       .maybeSingle();
 
@@ -69,6 +96,7 @@ export async function generateAndPostReply(
       reviewText: review.content ?? "",
       reviewerName: review.author_name,
       shopName: settings?.shop_name,
+      category: settings?.category,
       strengths: settings?.strengths,
       seoKeywords: settings?.seo_keywords ?? [],
     });
@@ -96,6 +124,7 @@ export async function generateAndPostReply(
     };
   } catch (error) {
     console.error("reply failed", error);
+    await releaseReviewClaim(review.id);
     return {
       status: "error",
       message:

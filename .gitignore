@@ -31,6 +31,9 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
+# 注意: ルート直下の .env は wrangler のビルド設定（WRANGLER_BUILD_*）を保持するため追跡対象。
+# ここに秘密情報を書き込むとコミットされる。秘密は .env.local / .dev.vars に置き、
+# Cloudflare では `wrangler secret put` を使うこと。
 .env*
 !.env.example
 !.env
@@ -50,3 +53,7 @@ next-env.d.ts
 /.dev.vars
 /.wrangler/
 /cloudflare-env.d.ts
+
+# build logs (open-next の dev 初期化が生成する)
+build.log
+build.err.log

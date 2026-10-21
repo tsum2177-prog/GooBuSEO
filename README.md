@@ -1,33 +1,380 @@
 # レビュー返信AI
 
-ローカル店舗向けの「Googleマップレビュー自動返信SaaS」。
+ローカル店舗向けの「Googleマップ レビュー自動返信SaaS」。
 
-## 技術スタック
+Googleマップのレビューを1時間ごとに取得し、評価点に応じてAIが返信文を書いて
+Googleマップへ投稿する。店舗はGoogleマップと接続するだけで、返信作成は自動化できる。
 
-- Next.js (App Router, TypeScript) + Tailwind CSS + shadcn/ui
-- Supabase (Auth / DB)
-- Stripe (月額課金)
-- Google Business Profile API (レビュー取得・返信投稿)
-- Gemini API (返信文の自動生成 / `gemini-3.5-flash-lite`)
-- **Cloudflare Workers**（OpenNext でデプロイ）
+| | |
+|---|---|
+| 対象ユーザー | 飲食店・美容院・歯科医院など、Googleマップで営業する個人店舗 |
+| 主な機能 | Google Business Profile連携、レビュー取得、AI返信生成、返信の自動投稿、月額課金 |
+| 技術スタック | Next.js 16 (App Router) / TypeScript / Tailwind CSS v4 / shadcn/ui / Supabase / Stripe / Gemini / Cloudflare Workers (OpenNext) |
 
-## セットアップ
+- 店舗利用者向けの操作説明 → [`docs/manual.md`](docs/manual.md)
+- 残タスクと未検証項目 → [`todolist.md`](todolist.md)
 
-### 1. 環境変数
+---
 
-1. [supabase.com](https://supabase.com) で新規プロジェクトを作成
-2. Project Settings → API から `Project URL` と `anon public` キーを取得
-3. `.env.example` を `.env.local` にコピーし、実際の値を設定
+## 目次
+
+1. [機能一覧](#1-機能一覧)
+2. [アーキテクチャ](#2-アーキテクチャ)
+3. [データモデル](#3-データモデル)
+4. [API リファレンス](#4-api-リファレンス)
+5. [AIの返信生成仕様](#5-aiの返信生成仕様)
+6. [セットアップ](#6-セットアップ)
+7. [デプロイ（Cloudflare Workers）](#7-デプロイcloudflare-workers)
+8. [検証手順](#8-検証手順)
+9. [ディレクトリ構成](#9-ディレクトリ構成)
+10. [運用メモ](#10-運用メモ)
+11. [既知の制約](#11-既知の制約)
+
+---
+
+## 1. 機能一覧
+
+| 機能 | 実装場所 |
+|---|---|
+| メール+パスワードの認証（Supabase Auth） | `src/app/(auth)/` |
+| 月額サブスク（Stripe Checkout + Webhook） | `src/app/(app)/billing/actions.ts`, `src/app/api/stripe/webhook/route.ts` |
+| ダッシュボード（プラン・店舗設定・最新レビュー） | `src/app/(app)/dashboard/page.tsx` |
+| 店舗設定（店舗名・業種・強み・SEOキーワード・自動返信ON/OFF） | `src/app/(app)/settings/` |
+| Google Business Profile OAuth連携（複数店舗を自動登録） | `src/app/api/google/oauth/`, `src/lib/google/oauth.ts` |
+| レビュー取得（1時間ごとのcron + 手動実行） | `src/app/api/reviews/sync/route.ts`, `src/lib/google/reviews.ts` |
+| AI返信生成（Gemini / `gemini-3.5-flash-lite`） | `src/lib/ai.ts` |
+| 返信の自動投稿・手動投稿 | `src/lib/google/auto-reply.ts`, `src/app/(app)/reviews/actions.ts` |
+| 公開ランディングページ | `src/app/page.tsx` |
+
+---
+
+## 2. アーキテクチャ
+
+### レイヤー構成
+
+```
+ブラウザ
+  │
+  ├─ Supabase SSR（Cookieセッション）
+  │    ├─ /login, /signup      認証フォーム
+  │    └─ /dashboard, /settings, /reviews
+  │         └─ Server Actions / Server Components
+  │
+  ├─ Stripe                     Checkout / Billing Portal / Webhook
+  ├─ Google Business Profile API  レビュー取得・返信投稿
+  └─ Gemini API                 返信文生成
+```
+
+### 処理の流れ（レビュー取得 → 返信投稿）
+
+```
+Cloudflare Cron（1時間ごと）
+  └─ worker.ts  scheduled handler
+       └─ GET /api/reviews/sync   （Authorization: Bearer $CRON_SECRET）
+            ├─ service role クライアントで全ユーザーを列挙
+            └─ ユーザーごとに
+                 ├─ syncReviews(userId)
+                 │    ├─ GBP API から最新50件を取得
+                 │    └─ reviews へ upsert（onConflict: user_id,external_id）
+                 └─ autoReplyPendingReviews(userId)
+                      ├─ shop_settings.auto_reply_enabled が true のときのみ
+                      ├─ reply_text が null のレビューを published_at 順に処理
+                      ├─ generateReply() → Gemini
+                      ├─ replyToReview() → GBP API（PUT /{review}/reply）
+                      └─ reviews を更新（reply_text / replied_at / auto_replied=true）
+```
+
+手動実行も同じ処理を通ります。
+`src/app/(app)/settings/actions.ts` の `syncReviewsAction` → `syncReviews` + `autoReplyPendingReviews`。
+
+### 自動返信の冪等性（同じレビューへ二重に投稿しない仕組み）
+
+返信は**店舗名義の公開レビュー**としてGoogleマップに残るため、生成と投稿は
+一度しか行われないことを保証します。2つの層で守っています。
+
+**1. アプリ層 — 返信履歴を消さない / 排他的に確保する**
+
+- `src/lib/google/reviews.ts` は、GBPの応答に `reviewReply` が含まれない場合に
+  ローカル保存済みの `reply_text` / `replied_at` を**上書きせず持ち越します**。
+  これをしないと「未返信」と判定され、同じレビューへ別の文章で再投稿されます。
+- `src/lib/review-claims.ts` の `claimReviews()` は、処理対象の行に `claimed_at` を
+  条件付きUPDATEで設定して確保します。同時実行しても同じ行を確保できるのは一方だけです。
+  10分以上取り残されたclaimは次の実行で回収します。
+- 手動投稿（`src/app/(app)/reviews/actions.ts`）も、返信済みレビューを拒否し、
+  投稿前に同じclaimを取得します。
+
+**2. DB層 — トリガーで強制する**
+
+- `reviews_preserve_reply` トリガー（マイグレーション
+  `20261020120400_add_claim_and_preserve_reply.sql`）が、更新時に
+  `reply_text` が `NULL` へ変わろうとした場合に旧値へ戻します。
+  アプリ層で漏れた経路でも、公開済み返信が失われることはありません。
+
+> `claimed_at` カラムは同マイグレーションで追加します。未適用の場合は
+> 排他制御が無効ですが、自動返信自体は動作し続けます（ログに警告が出ます）。
+
+### Supabaseクライアントの使い分け
+
+| ファイル | 役割 | RLS |
+|---|---|---|
+| `src/lib/supabase/client.ts` | ブラウザ用。ログイン・ログアウト | ユーザー権限で実行 |
+| `src/lib/supabase/server.ts` | Server Components / Server Actions 用。Cookieでセッションを読み書き | ユーザー権限で実行 |
+| `src/lib/supabase/admin.ts` | Service Role。Webhook・GBP接続情報・レビュー同期・自動返信 | **RLSを迂回** |
+
+> **原則**: データベースへの書き込みのうち、`reviews` と `gbp_connections` は
+> すべてservice roleクライアント経由です。ユーザー操作で直接書き込むのは
+> `shop_settings` のみで、こちらはRLSのinsert/updateポリシーに依存しています。
+
+### 認証とルート保護
+
+| レイヤー | 役割 |
+|---|---|
+| `src/proxy.ts`（Next.js 16 の middleware 後継） | リクエストごとのセッション更新。`/dashboard` は未ログイン時に`/login`へ、`/login`・`/signup`はログイン済みで`/dashboard`へ |
+| `src/app/(app)/layout.tsx` | `(app)` 配下の全ページで未ログインを検出して`/login`へリダイレクト |
+
+---
+
+## 3. データモデル
+
+テーブルは4つ。すべて `auth.users(id)` を外部キーとして持ち，用户削除でカスケード削除されます。
+
+### `profiles` — 契約状態
+
+| カラム | 型 | 制約 |
+|---|---|---|
+| `id` | uuid | PK / `auth.users(id)` へのFK |
+| `email` | text | |
+| `subscription_status` | text | NOT NULL, default `'none'`, CHECK (`none` / `active` / `past_due` / `canceled`) |
+| `stripe_customer_id` | text | UNIQUE |
+| `stripe_price_id` | text | |
+| `created_at` / `updated_at` | timestamptz | NOT NULL, default `now()` |
+
+`auth.users` への insert をトリガーに `handle_new_user()` が profiles 行を自動作成します。
+
+### `shop_settings` — 店舗ごとの設定（ユーザー1行）
+
+| カラム | 型 | 制約 |
+|---|---|---|
+| `id` | uuid | PK / `auth.users(id)` へのFK |
+| `shop_name` | text | |
+| `category` | text | 業種（飲食店・居酒屋・バー・喫茶店・カフェ・美容院・理容店・歯科医院・クリニック・ホテル・旅館・その他） |
+| `strengths` | text | NOT NULL, default `''` |
+| `seo_keywords` | text[] | NOT NULL, default `'{}'`（最大20個） |
+| `auto_reply_enabled` | boolean | NOT NULL, default `false` |
+| `created_at` / `updated_at` | timestamptz | NOT NULL, default `now()` |
+
+### `reviews` — 取得したレビューと返信履歴
+
+| カラム | 型 | 制約 |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `user_id` | uuid | NOT NULL / `auth.users(id)` へのFK |
+| `location_id` | text | GBPのロケーション名 |
+| `external_id` | text | NOT NULL, GBPのレビューID。**UNIQUE (`user_id`, `external_id`)** |
+| `author_name` | text | 名前のないレビューは null |
+| `rating` | integer | NOT NULL, CHECK (1〜5) |
+| `content` | text | |
+| `published_at` | timestamptz | |
+| `reply_text` | text | |
+| `replied_at` | timestamptz | |
+| `auto_replied` | boolean | NOT NULL, default `false`。手動=false / 自動=true |
+| `claimed_at` | timestamptz | 自動返信の排他制御用。処理対象の行を条件付きUPDATEで確保し、同時実行による二重投稿を防ぐ |
+| `created_at` | timestamptz | NOT NULL, default `now()` |
+
+インデックス: `(user_id, published_at desc)`, `(user_id, claimed_at)`
+
+### `gbp_connections` — Google連携トークン
+
+| カラム | 型 | 制約 |
+|---|---|---|
+| `id` | uuid | PK, default `gen_random_uuid()` |
+| `user_id` | uuid | NOT NULL / `auth.users(id)` へのFK |
+| `google_account_id` | text | NOT NULL |
+| `google_account_name` | text | |
+| `location_id` | text | NOT NULL。**UNIQUE (`user_id`, `location_id`)** |
+| `location_title` | text | |
+| `access_token` | text | NOT NULL。**AES-256-GCMで暗号化済み** |
+| `refresh_token` | text | NOT NULL。**AES-256-GCMで暗号化済み** |
+| `expires_at` | timestamptz | NOT NULL |
+| `created_at` / `updated_at` | timestamptz | NOT NULL, default `now()` |
+
+### RLS ポリシー一覧
+
+全テーブルで `enable row level security` が有効です。
+
+| テーブル | ポリシー | コマンド | 条件 |
+|---|---|---|---|
+| `profiles` | `profiles_select_own` | SELECT | `auth.uid() = id` |
+| `shop_settings` | `shop_settings_select_own` | SELECT | `auth.uid() = id` |
+| `shop_settings` | `shop_settings_insert_own` | INSERT | `auth.uid() = id` |
+| `shop_settings` | `shop_settings_update_own` | UPDATE | `auth.uid() = id` |
+| `reviews` | `reviews_select_own` | SELECT | `auth.uid() = user_id` |
+| `gbp_connections` | `gbp_connections_select_own` | SELECT | `auth.uid() = user_id` |
+| `gbp_connections` | `gbp_connections_delete_own` | DELETE | `auth.uid() = user_id` |
+
+> `reviews` と `gbp_connections` には insert/update ポリシーがありません。
+> 書き込みは service role クライアントがRLSを迂回して行います。
+
+### マイグレーションの適用
+
+Supabase の **SQL Editor** で `supabase/migrations/` のファイルを**順番に**実行してください。
+1ファイル目で `set_updated_at()` 関数が作られます。
+
+1. `20261019120000_create_profiles.sql`
+2. `20261020120000_create_shop_settings.sql`
+3. `20261020120100_create_reviews.sql`
+4. `20261020120200_create_gbp_connections.sql`
+5. `20261020120300_add_category_and_auto_reply.sql`（`category` / `auto_reply_enabled` / `auto_replied`）
+6. `20261020120400_add_claim_and_preserve_reply.sql`（`claimed_at` / 返信履歴保持トリガー）
+
+`supabase/setup-all.sql` は全マイグレーションをまとめた**冪等**なスクリプトです。
+几次実行しても失敗しません（`create table if not exists` / `drop policy if exists` / トランザクションで囲み +
+末尾の確認クエリ付き）。
+
+---
+
+## 4. API リファレンス
+
+### ルートハンドラ
+
+#### `GET /api/google/oauth/start`
+
+Google OAuth2の認可URLへリダイレクトします。
+
+- **認可**: ログインユーザーのみ。未ログインは `/login` へ
+- **リダイレクト先**: Googleの同意画面
+- **CSP対策**: `state` をランダム生成し、`google_oauth_state` Cookie（httpOnly / sameSite=lax / 10分）へ保存
+- **エラー**: `GOOGLE_CLIENT_ID` 未設定なら `/settings?google=not_configured`
+
+#### `GET /api/google/oauth/callback`
+
+OAuth2のコールバック。
+
+- **認可**: ログインユーザーのみ。`state` が Cookie の値と一致しない場合は `400`
+- **処理**: コードをトークンに交換 → リフレッシュトークンが無い場合は `/settings?google=need_reconsent` → アカウント一覧 → 配下の全ロケーションを `gbp_connections` に保存
+- **リダイレクト先**: `/settings?google=connected` / `no_location` / `error`
+
+#### `GET|POST /api/reviews/sync`
+
+レビュー取得と自動返信のバッチ処理。cronの実行対象です。
+
+- **認可**: `Authorization: Bearer ${CRON_SECRET}` が一致しない場合は `401`
+- **処理**: service role クライアントで `gbp_connections` から全ユーザーを列挙し、各ユーザーについて `syncReviews` と `autoReplyPendingReviews` を実行
+- **レスポンス**: `{ ok: true, users, imported, replied }`
+
+#### `POST /api/stripe/webhook`
+
+Stripeからのイベント受信。
+
+- **認可**: `stripe-signature` ヘッダーを `stripe.webhooks.constructEvent` で検証
+- **対応イベント**:
+  - `checkout.session.completed` → `profiles` に `stripe_customer_id` / `email` を保存
+  - `customer.subscription.created` / `updated` / `deleted` → `subscription_status` を `none` / `active` / `past_due` / `canceled` にマップして更新
+
+#### `GET /auth/confirm`
+
+メール確認リンクの処理。
+
+- `token_hash` + `type` がある場合は `supabase.auth.verifyOtp`、なければ `code` で `exchangeCodeForSession`
+- 成功 → `/dashboard`、失敗 → `/error?reason=confirm`
+
+### Server Actions
+
+| ファイル | アクション | 概要 |
+|---|---|---|
+| `src/app/(app)/settings/actions.ts` | `saveShopSettings` | `shop_settings` の upsert（ユーザー権限） |
+| | `syncReviewsAction` | レビュー取得 + 自動返信 |
+| | `disconnectGoogleAction` | `gbp_connections` の削除 |
+| `src/app/(app)/reviews/actions.ts` | `generateAndPostReply` | 1件のレビューについてAI返信生成 → GBPへ投稿 |
+| `src/app/(app)/billing/actions.ts` | `createCheckoutSession` | Stripe Checkout Session の作成とリダイレクト |
+| | `createPortalSession` | Stripe Billing Portal へのリダイレクト |
+
+---
+
+## 5. AIの返信生成仕様
+
+`src/lib/ai.ts`。Gemini の **OpenAI互換エンドポイント** を `fetch` で直接叩きます（SDKは不使用）。
+
+```
+POST https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
+Authorization: Bearer ${GEMINI_API_KEY}
+{ "model": "${GEMINI_MODEL ?? gemini-3.5-flash-lite}", "messages": [...] }
+```
+
+### システムプロンプトの分岐
+
+| 評価 | 方針 | SEOキーワード |
+|---|---|---|
+| 1〜3点（低評価） | 感情的にならず誠実に謝罪し、今後の改善方針を具体的に示す | **入れない**（コード側でも `[]` に落とす） |
+| 4〜5点（高評価） | 感謝を伝えつつ、キーワードを文章に自然に盛り込む | 入れる（並列ではなく文中に） |
+
+共通ルール:
+- 業種に合った言い回しにする
+- 200〜300字程度の1段落
+- 丁寧語で店舗側の立場
+- 説明文・記号・Markdownは不要。返信文のみを出力
+
+### ユーザープロンプトに渡す値
+
+```
+【店舗名】…  【業種】…  【店舗の特徴】…  【SEOキーワード】…
+【評価】…点  【お客様名】…  【レビュー本文】…
+```
+
+> **注意**: 手動投稿パス（`src/app/(app)/reviews/actions.ts`）と自動投稿パス
+> （`src/lib/google/auto-reply.ts`）の両方が `category` を渡します。
+> どちらの経路でも「業種」はプロンプトに反映されます。
+
+### プロバイダの切り替え
+
+プロバイダ非依存の名前にしてあります（`src/lib/ai.ts` / `isAiConfigured()`）。
+モデルとキーは環境変数で差し替えます。
+
+```bash
+GEMINI_API_KEY=...
+GEMINI_MODEL=gemini-3.5-flash-lite
+```
+
+---
+
+## 6. セットアップ
+
+### 6.1 環境変数
+
+`.env.example` を `.env.local` にコピーして値を記入します。
 
 ```bash
 cp .env.example .env.local
 ```
 
-### 2. Supabase側の設定（メール確認）
+| 変数 | クライアント公開 | 用途 |
+|---|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | 公開 | Supabase プロジェクトURL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 公開 | Supabase anonキー |
+| `SUPABASE_SERVICE_ROLE_KEY` | 非公開 | Service Roleキー（webhook・GBP接続・レビュー同期） |
+| `STRIPE_SECRET_KEY` | 非公開 | Stripe Secret Key |
+| `STRIPE_PRICE_ID` | 非公開 | 月額プランの Price ID |
+| `STRIPE_WEBHOOK_SECRET` | 非公開 | Webhook署名検証用シークレット |
+| `GOOGLE_CLIENT_ID` | 非公開 | OAuth クライアントID |
+| `GOOGLE_CLIENT_SECRET` | 非公開 | OAuth クライアントシークレット |
+| `GOOGLE_REDIRECT_URI` | 非公開 | 承認済みリダイレクトURI |
+| `GOOGLE_TOKEN_ENCRYPTION_KEY` | 非公開 | トークン暗号化キー（32バイトhex） |
+| `GEMINI_API_KEY` | 非公開 | Gemini APIキー |
+| `GEMINI_MODEL` | 非公開 | モデル名（既定 `gemini-3.5-flash-lite`） |
+| `CRON_SECRET` | 非公開 | `/api/reviews/sync` のBearerトークン |
 
-開発時のみ: Authentication → Sign In / Providers → Email の **Confirm email を OFF** にすると確認メール不要で即ログインできます。
+> **秘密の置き場所**
+> `.env.local` と `.dev.vars` はgitignore対象です。ルートの `.env` は
+> `WRANGLER_BUILD_*` 用のため追跡対象になっています。**ここに秘密情報は書かないでください**。
 
-Confirm email を ON で使う場合は、Authentication → Email Templates → Confirm signup のURLを変更してください。
+### 6.2 Supabase（メール確認）
+
+Supabase プロジェクトを作成し、**Project Settings → API** からURLとanonキーを取得します。
+
+- **開発時のみ**: Authentication → Sign In / Providers → Email の **Confirm email を OFF** にすると確認メールなしでログインできます
+- **本番では Confirm email を ON** のままにしてください（未確認アカウントの攻撃リスク）
+
+Confirm email を ON で使う場合、Authentication → Email Templates → Confirm signup のURLを変更します。
 
 ```
 {{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&type=email
@@ -35,29 +382,21 @@ Confirm email を ON で使う場合は、Authentication → Email Templates →
 
 （デフォルトの `{{ .ConfirmationURL }}` のままでも `/auth/confirm?code=` 経由で動作します）
 
-※ Supabaseは `example.com` などの予約ドメインを新規登録に拒否します。テスト時は実在するドメインのメールアドレスを使ってください。
+> Supabaseは `example.com` などの予約ドメインを新規登録に拒否します。テスト時は実在するドメインのメールアドレスを使ってください。
 
-### 3. データベース
+### 6.3 データベース
 
-Supabase の **SQL Editor** で、`supabase/migrations/` 以下のファイルを **順番に** 実行してください。
+[3. データモデル](#マイグレーションの適用) を参照してください。
 
-1. `supabase/migrations/20261019120000_create_profiles.sql`（profilesテーブル・RLS・新規ユーザー自動作成トリガー）
-2. `supabase/migrations/20261020120000_create_shop_settings.sql`（店舗設定テーブル・RLS）
-3. `supabase/migrations/20261020120100_create_reviews.sql`（レビュー履歴テーブル・RLS）
-4. `supabase/migrations/20261020120200_create_gbp_connections.sql`（Google連携トークン保存テーブル・RLS）
-5. `supabase/migrations/20261020120300_add_category_and_auto_reply.sql`（業種・自動返信ON/OFF・自動投稿フラグ）
+### 6.4 Stripe（月額課金）
 
-順番どおりに実行してください（`set_updated_at` 関数は1つ目が作ります）。実行後、最後の確認クエリのResultsに `shop_settings` の `category` / `auto_reply_enabled` と `reviews` の `auto_replied` が表示されていれば成功です。
-
-### 4. Stripe設定（月額課金）
-
-1. Stripe Dashboard → Products で **月額プラン** を作成し、Price IDを取得（`price_...`）
-2. Developers → API keys の **Secret key** を取得（`sk_test_...` / 本番は `sk_live_...`）
+1. Products で**月額プラン**を作成し、Price ID（`price_...`）を取得
+2. Developers → API keys の Secret Key（`sk_test_...` / 本番は `sk_live_...`）を取得
 3. Developers → Webhooks でエンドポイントを作成
    - URL: `https://<your-domain>/api/stripe/webhook`
    - イベント: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`
-   - Signing secret を取得（`whsec_...`）
-4. `.env.local` に `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` / `SUPABASE_SERVICE_ROLE_KEY` を設定
+   - Signing secret（`whsec_...`）を取得
+4. `.env.local` に `STRIPE_SECRET_KEY` / `STRIPE_PRICE_ID` / `STRIPE_WEBHOOK_SECRET` を設定
 
 ローカル開発時はStripe CLIで転送します。
 
@@ -66,9 +405,9 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 # 出力された whsec_... を .env.local の STRIPE_WEBHOOK_SECRET に設定
 ```
 
-※ 環境変数が未設定の間はダッシュボードに「決済設定がまだ完了していないため、契約できません」と表示され、契約ボタンは出ません。
+> 環境変数が未設定の間はダッシュボードに「決済設定がまだ完了していないため、契約できません」と表示され、契約ボタンは出ません。
 
-### 5. Googleマップ連携の設定（フェーズ4）
+### 6.5 Googleマップ連携
 
 1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作成
 2. APIs & Services → ライブラリ → **Business Profile APIs** を有効化
@@ -82,16 +421,17 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 openssl rand -hex 32
 ```
 
-> **注意**: Business Profile API を一般の店舗ユーザーに提供するには、Googleによるアクセス承認（審査）が必要です。審査前のPJでは自分のアカウントの店舗のみ認識されます。実店舗への提供開始は審査完了が前提です。
+> **注意**: Business Profile API を一般の店舗ユーザーに提供するには、Googleによるアクセス承認（審査）が必要です。
+> 審査前のPJでは自分のアカウントの店舗のみ認識されます。実店舗への提供開始は審査完了が前提です。
 
-### 6. Geminiの設定（フェーズ5）
+### 6.6 Gemini
 
 1. [Google AI Studio](https://aistudio.google.com/apikey) でAPIキーを作成
 2. `.env.local` に `GEMINI_API_KEY` を設定（モデル変更は `GEMINI_MODEL`、既定は `gemini-3.5-flash-lite`）
 
-> OpenAI互換エンドポイント（`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`）を直接叩いているため、OpenAI SDKは不要です。
+> OpenAI互換エンドポイントを直接叩いているため、OpenAI SDKは不要です。
 
-### 7. 起動
+### 6.7 起動
 
 ```bash
 npm install --include=dev
@@ -100,25 +440,32 @@ npm run dev
 
 http://localhost:3000 を開く
 
-> **開発時の注意**: Next.js 16 は開発サーバーへの別オリジンからのアクセスを遮断します。`http://127.0.0.1:3000` や LAN の IP でアクセスする場合は、`next.config.ts` の `allowedDevOrigins` にそのホストを追加してください（`127.0.0.1` は設定済み）。この設定が無いと HMR 接続が遮断され、**React がハイドレーションされずボタンなどが一切反応しません**（本番ビルドでは起こりません）。
+> **開発時の注意**: Next.js 16 は開発サーバーへの別オリジンからのアクセスを遮断します。
+> `http://127.0.0.1:3000` やLANのIPでアクセスする場合は、`next.config.ts` の
+> `allowedDevOrigins` にそのホストを追加してください（`127.0.0.1` は設定済み）。
+> この設定が無いとHMR接続が遮断され、**Reactがハイドレーションされずボタンなどが一切反応しません**（本番ビルドでは起こりません）。
 
-> **メモリ不足でビルドが失敗する場合**: `Zone Allocation failed - process out of memory` が出る場合は、ブラウザを閉じて空きメモリを増やしたうえで、heapを拡張して実行してください。
+> **メモリ不足でビルドが失敗する場合**: `Zone Allocation failed - process out of memory` が出る場合は、
+> ブラウザを閉じて空きメモリを増やしたうえでheapを拡張して実行してください。
 >
 > ```bash
 > set NODE_OPTIONS=--max-old-space-size=6144 && npm run build   # Windows (cmd)
 > NODE_OPTIONS=--max-old-space-size=6144 npm run build         # macOS / Linux
 > ```
 
-## デプロイ（Cloudflare Workers）
+---
 
-Cloudflare Pages の旧来のNext.js対応（`@cloudflare/next-on-pages`）は非推奨のため、**Cloudflare Workers + OpenNext** でデプロイします。
+## 7. デプロイ（Cloudflare Workers）
 
-### 1. 前提
+Cloudflare Pages の旧来のNext.js対応（`@cloudflare/next-on-pages`）は非推奨のため、
+**Cloudflare Workers + OpenNext** でデプロイします。
+
+### 7.1 前提
 
 - Cloudflare アカウント（Workers **Paid** プラン推奨。FreeプランはWorkerサイズ3MB・CPU時間10ms制限で本アプリには不足します）
 - `npm install --include=dev`（`NODE_ENV=production` が設定されている環境では devDependencies が入れられないため）
 
-### 2. ローカルで動作確認（workerd）
+### 7.2 ローカルで動作確認（workerd）
 
 ```bash
 npm run preview     # ビルドして Workers ランタイムでローカル起動（http://127.0.0.1:8787）
@@ -126,15 +473,16 @@ npm run preview     # ビルドして Workers ランタイムでローカル起�
 
 `.dev.vars`（gitignore対象）にローカル用の環境変数を置いてください。`NEXTJS_ENV=development` を含めると `.env.local` が読み込まれます。
 
-### 3. Cloudflare へログイン
+### 7.3 Cloudflare へログイン
 
 ```bash
 npx wrangler login
 ```
 
-### 4. Secret（環境変数）を登録
+### 7.4 Secret（環境変数）を登録
 
-`NEXT_PUBLIC_*` はビルド時にインライン化されるため、**ビルド時に `.env.local` が必要です**。サーバー実行時に必要な値は Secret として登録します。
+`NEXT_PUBLIC_*` はビルド時にインライン化されるため、**ビルド時に `.env.local` が必要**です。
+サーバー実行時に必要な値は Secret として登録します。
 
 ```bash
 npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
@@ -149,17 +497,21 @@ npx wrangler secret put GEMINI_API_KEY
 npx wrangler secret put CRON_SECRET
 ```
 
-### 5. デプロイ
+### 7.5 デプロイ
 
 ```bash
 npm run deploy      # opennextjs-cloudflare build && opennextjs-cloudflare deploy
 ```
 
-デプロイ後は `https://<worker名>.< subdomain>.workers.dev` でアクセスできます。独自ドメインは Cloudflare ダッシュボードの Workers → Settings → Domains で設定します。
+デプロイ後は `https://<worker名>.<subdomain>.workers.dev` でアクセスできます。
+独自ドメインは Cloudflare ダッシュボードの Workers → Settings → Domains で設定します。
 
-### 6. 自動取得（cron）
+### 7.6 自動取得（cron）
 
-`wrangler.jsonc` の `triggers.crons` で **1時間ごとに** `/api/reviews/sync` が実行されます（`worker.ts` の scheduled handler が `CRON_SECRET` 付きで内部呼び出しします）。`CRON_SECRET` が未設定だとログにエラーが出て実行されません。
+`wrangler.jsonc` の `triggers.crons` で **1時間ごとに** `/api/reviews/sync` が実行されます。
+`worker.ts` の scheduled handler が `CRON_SECRET` 付きで内部呼び出しします
+（Cloudflareのcronは認証ヘッダーを付けられないため）。
+`CRON_SECRET` が未設定だとログにエラーが出て実行されません。
 
 ローカルでcronを手動発火する場合:
 
@@ -167,22 +519,26 @@ npm run deploy      # opennextjs-cloudflare build && opennextjs-cloudflare deplo
 curl http://127.0.0.1:8787/cdn-cgi/local/scheduled
 ```
 
-### Cloudflare固有の制約（重要）
+### 7.7 Cloudflare固有の制約（重要）
 
 | 制約 | 対応 |
 |---|---|
-| **Cache Components（`cacheComponents`）は使用不可** | workerdの `setTimeout()` 実装と非互換でページ描画がハングします。`next.config.ts` で無効化済み。`await connection()` / `export const instant` は使わない |
+| **Cache Components（`cacheComponents`）は使用不可** | workerdの `setTimeout()` 実装と非互換でページ描画がハングします。`await connection()` / `export const instant` は使わず、各ページに `export const dynamic = "force-dynamic"` を指定します |
 | **Node.js middleware（`proxy.ts`）はexperimental** | 公式は「動作保証なし」。動作は確認済みですが、Cloudflareの更新で変わる可能性があります |
 | Workerサイズ上限 | Free 3MB / Paid 10MB（gzip後）。`stripe` と `supabase-js` が大きいためPaid推奨 |
 | R2 / D1 / Durable Objects は**不要** | 全ルートが動的（SSR）のため、キャッシュ設定なしで動作します |
 | Windowsでのビルドは非推奨 | 公式は WSL または CI（GitHub Actions）でのビルドを推奨。`npm run deploy` は Windows でも動作します |
 
-## 検証手順
+---
+
+## 8. 検証手順
+
+手動で一通り確認する手順です。
 
 1. 未ログインで `/dashboard` `/settings` `/reviews` → `/login` へリダイレクトされること
-2. `/signup` で新規登録 → ログイン → `/dashboard` が表示されること
+2. `/signup` で新規登録 → 確認メール → ログイン → `/dashboard` が表示されること
 3. ログアウト → `/dashboard` へ直接アクセスすると `/login` へ戻ること
-4. `npm run build` がエラーなく通ること
+4. `npm run lint` と `npm run build` がエラーなく通ること
 5. ダッシュボードに「月額プラン」カードが表示され、ステータスが「未契約」バッジで見えること
 6. （Stripe設定後）「月額プランを契約する」→ Checkout画面 → テストカード決済 → `/dashboard?checkout=success` へ戻り、webhook反映後に「契約中」バッジへ変わること
 7. `/settings` で店舗名・業種・強み・SEOキーワードを保存し、再読み込み後も保持されること
@@ -192,63 +548,110 @@ curl http://127.0.0.1:8787/cdn-cgi/local/scheduled
 11. 「レビューを取得する」でレビューが取得され、`/reviews` に表示されること
 12. 未返信のレビューで「AI返信を作成して投稿」→ Googleマップに返信が掲載され、レビュー一覧に「返信済み」と表示されること
 13. 自動返信がONの状態でレビューを取得すると、自動で返信が生成・投稿され「AIが自動で作成した返信」と表示されること
+14. 低評価（1〜3点）の返信にSEOキーワードが入っていないこと、高評価（4〜5点）には入っていること
+15. 「業種」を設定した状態で返信を生成すると、業種に合った言い回しになること
+16. 返信済みのレビューで「AI返信を作成して投稿」を押すと「既に返信しています」と表示され、二重投稿されないこと
 
-## ディレクトリ構成
+### 自動返信の冪等性（スクリプトで検証）
+
+`scripts/verify-reply-idempotency.ts` はGBP APIをスタブし、**実際の `syncReviews()` を
+ライブDBに対して実行**して、返信履歴が失われず二重投稿が起きないことを確認します。
+テストデータは実行の前後で削除されます。
+
+```bash
+npx tsx scripts/verify-reply-idempotency.ts
+```
+
+| 検証内容 | 期待結果 |
+|---|---|
+| GBPが `reviewReply` を含まない取得の再来 | 保存済みの `reply_text` / `replied_at` が保持される |
+| GBPが `reviewReply` を含む取得 | GBP側の値（Googleで編集した内容）が採用される |
+| 未返信レビューの再取得 | `reply_text` は `null` のまま |
+| `claimed_at` カラム未適用時 | `claimReviews()` が例外を投げずに排他制御なしで続行する |
+
+> **注意**: `claimed_at` を使う排他制御（C5）を効かせるには、
+> `20261020120400_add_claim_and_preserve_reply.sql` の適用が必要です。
+> 未適用の場合も自動返信は動作しますが、排他制御は効きません（ログに警告が出ます）。
+
+---
+
+## 9. ディレクトリ構成
 
 ```
 src/
 ├── proxy.ts                 # セッション更新とルート保護（Next.js 16のmiddleware後継）
 ├── lib/
-│   ├── crypto.ts            # Googleトークンの暗号化（AES-256-GCM）
 │   ├── ai.ts                 # AI返信文の生成（Gemini / OpenAI互換エンドポイント）
-│   ├── origin.ts            # リクエスト元のオリジン取得
+│   ├── crypto.ts             # Googleトークンの暗号化（AES-256-GCM）
+│   ├── origin.ts             # リクエスト元のオリジン取得
+│   ├── review-claims.ts      # 自動返信の排他制御（claimed_at の確保・解放）
+│   ├── stripe.ts             # Stripeクライアント・価格ラベル取得
 │   ├── google/
-│   │   ├── oauth.ts         # OAuth2.0（認証URL・コード交換・トークン更新）
-│   │   ├── business.ts      # Business Profile API（店舗・レビュー取得・返信）
-│   │   ├── connections.ts   # 連携情報の保存とアクセストークン管理
-│   │   ├── reviews.ts       # レビュー取得・DB同期
-│   │   └── auto-reply.ts    # 未返信レビューの自動生成・自動投稿
+│   │   ├── oauth.ts          # OAuth2.0（認証URL・コード交換・トークン更新）
+│   │   ├── business.ts       # Business Profile API（店舗・レビュー取得・返信）
+│   │   ├── connections.ts    # 連携情報の保存とアクセストークン管理
+│   │   ├── reviews.ts        # レビュー取得・DB同期
+│   │   └── auto-reply.ts     # 未返信レビューの自動生成・自動投稿
 │   ├── supabase/
-│   │   ├── client.ts        # ブラウザ用クライアント
-│   │   ├── server.ts        # サーバー用クライアント
-│   │   └── admin.ts         # Service Roleクライアント（webhook・Google連携用）
-│   └── stripe.ts            # Stripeクライアント
+│   │   ├── client.ts         # ブラウザ用クライアント
+│   │   ├── server.ts         # サーバー用クライアント
+│   │   └── admin.ts          # Service Roleクライアント（webhook・Google連携用）
+│   └── utils.ts              # cn ヘルパー
 ├── components/
-│   ├── ui/                  # shadcn/uiコンポーネント
-│   ├── auth/                # ログイン・新規登録フォーム
+│   ├── ui/                   # shadcn/uiコンポーネント（Base UIベース）
+│   ├── auth/                 # ログイン・新規登録フォーム
 │   ├── billing/plan-card.tsx # 月額プランカード（ステータス・契約/管理ボタン）
-│   ├── settings/            # 店舗設定フォーム・Google連携カード
-│   ├── reviews/             # レビュー履歴リスト・AI返信ボタン
-│   └── app-header.tsx       # 認証後ヘッダー（ナビゲーション）
+│   ├── landing/              # ランディングページ用（ヘッダー・レビュー実例・FAQ）
+│   ├── reviews/              # レビュー履歴リスト・AI返信ボタン
+│   ├── settings/             # 店舗設定フォーム・Google連携カード
+│   └── app-header.tsx        # 認証後ヘッダー（ナビゲーション）
 └── app/
-    ├── page.tsx             # トップページ
-    ├── (auth)/              # ログイン・新規登録
-    ├── (app)/dashboard/     # 保護ページ（プランカード・店舗設定・最新レビュー）
-    ├── (app)/settings/      # 店舗設定ページ + Server Actions
-    ├── (app)/reviews/       # レビュー履歴ページ + Server Actions
-    ├── (app)/billing/       # Checkout/Portal Server Actions
-    ├── api/stripe/webhook/  # Stripe webhook（署名検証・ステータス更新）
-    ├── api/google/oauth/    # Google OAuth 開始・コールバック
-    ├── api/reviews/sync/    # レビュー一括取得（CRON_SECRETで認可）
-    ├── auth/confirm/        # メール確認リンク処理
-    └── error/               # 認証エラーページ
-supabase/migrations/         # DBマイグレーションSQL
-open-next.config.ts         # OpenNext（Cloudflare Workers）設定
-wrangler.jsonc              # Workers設定（assets・cron・compatibility flags）
-worker.ts                   # Workersカスタムラッパー（cronのscheduled handler）
+    ├── page.tsx              # ランディングページ
+    ├── layout.tsx            # ルートレイアウト（テーマ・Toaster）
+    ├── globals.css           # テーマトークン
+    ├── (auth)/               # ログイン・新規登録
+    ├── (app)/dashboard/      # 保護ページ（プランカード・店舗設定・最新レビュー）
+    ├── (app)/settings/       # 店舗設定ページ + Server Actions
+    ├── (app)/reviews/        # レビュー履歴ページ + Server Actions
+    ├── (app)/billing/        # Checkout/Portal Server Actions
+    ├── api/stripe/webhook/   # Stripe webhook（署名検証・ステータス更新）
+    ├── api/google/oauth/     # Google OAuth 開始・コールバック
+    ├── api/reviews/sync/     # レビュー一括取得（CRON_SECRETで認可）
+    ├── auth/confirm/         # メール確認リンク処理
+    └── error/                # 認証エラーページ
+docs/manual.md                # 店舗利用者向けの操作マニュアル
+scripts/                     # 検証スクリプト（ライブDBに対して実行する）
+supabase/migrations/          # DBマイグレーションSQL
+supabase/setup-all.sql        # 全マイグレーションの冪等な統合スクリプト
+open-next.config.ts           # OpenNext（Cloudflare Workers）設定
+wrangler.jsonc                # Workers設定（assets・cron・compatibility flags）
+worker.ts                     # Workersカスタムラッパー（cronのscheduled handler）
 ```
 
-## 運用メモ
+---
 
-- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得はCloudflareのcron（`wrangler.jsonc` の `triggers.crons`）が1時間ごとに `/api/reviews/sync` を実行します。
-- **自動返信**: `/settings` の「自動返信をONにする」がONの店舗だけ、取得したレビューへ自動で返信を投稿します（初期値はOFF）。手動で投稿したものは「AIが作成した返信」、自動のものは「AIが自動で作成した返信」と表示されます。
+## 10. 運用メモ
+
+- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得はCloudflareのcron（`wrangler.jsonc` の `triggers.crons`）が1時間ごとに `/api/reviews/sync` を実行します。1店舗につき最新50件まで。
+- **自動返信**: `shop_settings.auto_reply_enabled` が true の店舗だけ、取得したレビューへ自動で返信を投稿します（初期値はOFF）。手動で投稿したものは「AIが作成した返信」、自動のものは「AIが自動で作成した返信」と表示されます。処理対象の行は `claimed_at` で排他的に確保するため、cron と手動操作が同時に走っても同じレビューへ二重投稿されません。
+- **返信の保持**: 一度投稿した返信は、再取得のたびに消えることはありません。GBPの応答に `reviewReply` が含まれない場合も保存済みの返信履歴は保持されます。
 - **AI返信の投稿**: 低評価（1〜3点）は「謝罪・改善案のみ、SEOキーワードは入れない」、高評価（4〜5点）は「感謝 + SEOキーワードを自然に盛り込み」。生成した文はそのままGoogleマップへ投稿されます。
-- **トークン管理**: Googleのアクセストークン・リフレッシュトークンは `GOOGLE_TOKEN_ENCRYPTION_KEY` で暗号化して保存しています。キーが変わると再連携が必要です。
+- **トークン管理**: Googleのアクセストークン・リフレッシュトークンは `GOOGLE_TOKEN_ENCRYPTION_KEY` で暗号化して保存しています。キーが変わると再連携が必要です。**本番と開発では別のキーを使ってください。**
+- **トークンの更新**: `getValidAccessToken()` が暗号化されたアクセストークンを復号し、期限（現在時刻+60秒より前）が切れている場合はリフレッシュトークンで更新・再暗号化します。
+- **暗号化方式**: AES-256-GCM。形式は `base64(iv).base64(authTag).base64(ciphertext)`。鍵は `GOOGLE_TOKEN_ENCRYPTION_KEY`（64文字のhex = 32バイト）。
 
-## フェーズロードマップ
+---
 
-- **フェーズ1（完了）**: Next.js + shadcn/ui + Supabase Authログイン
-- **フェーズ2（完了）**: Stripe決済・サブスク状態の更新（profilesテーブル・Checkout・webhook）
-- **フェーズ3（完了）**: ダッシュボード（SEOキーワード設定・レビュー履歴）
-- **フェーズ4（完了）**: Google Business Profile API OAuth連携・レビュー取得
-- **フェーズ5（完了）**: Geminiによる返信生成・Google APIへの返信投稿
+## 11. 既知の制約
+
+外部サービスの設定など、未検証の項目は [`todolist.md`](todolist.md) を参照してください。コードから読み取れる制約は以下のとおりです。
+
+| 制約 | 影響 |
+|---|---|
+| レビューの取得件数は最新50件 | 50件を超えると古いレビューは自動取得の対象外 |
+| レビュー一覧のページングなし | 全件を一度に読み込みます |
+| `reviews` と `gbp_connections` に insert/update のRLSポリシーがない | service role 経由の一括書き込みのみ。ユーザー操作で直接書き込めない設計です |
+| 自動返信にレート制限・上限がない | ONにすると取得した未返信レビューが連続して投稿されます |
+| ルート直下の `.env` が追跡対象 | `WRANGLER_BUILD_*` を保持するため。秘密情報は `.env.local` / `.dev.vars` / `wrangler secret put` で管理してください |
+| `src/proxy.ts` の保護対象は `/dashboard` のみ | `/settings` と `/reviews` は `(app)` レイアウト側のリダイレクトで保護されています |
+| テスト・CIが無い | 変更後は `npm run lint` と `npm run build`、および[検証手順](#8-検証手順)による手動確認が必要です |

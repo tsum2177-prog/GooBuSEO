@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
+import { SubscriptionNotice } from "@/components/billing/subscription-notice";
 import { GoogleConnectionCard } from "@/components/settings/google-connection-card";
 import { ShopSettingsForm } from "@/components/settings/shop-settings-form";
+import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
 import { listConnections } from "@/lib/google/connections";
 import { isGoogleConfigured } from "@/lib/google/oauth";
 import { createClient } from "@/lib/supabase/server";
@@ -48,18 +50,27 @@ export default async function SettingsPage({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [{ data: settings }, connections] = await Promise.all([
-    supabase
-      .from("shop_settings")
-      .select(
-        "shop_name, category, strengths, seo_keywords, auto_reply_enabled"
-      )
-      .eq("id", user.id)
-      .maybeSingle(),
-    listConnections(user.id).catch(() => []),
-  ]);
+  const [{ data: settings }, connections, { data: profile }] =
+    await Promise.all([
+      supabase
+        .from("shop_settings")
+        .select(
+          "shop_name, category, strengths, seo_keywords, auto_reply_enabled"
+        )
+        .eq("id", user.id)
+        .maybeSingle(),
+      listConnections(user.id).catch(() => []),
+      supabase
+        .from("profiles")
+        .select("subscription_status")
+        .eq("id", user.id)
+        .maybeSingle(),
+    ]);
 
   const message = google ? googleMessages[google] : undefined;
+  const canSync = isAccessibleStatus(
+    parseSubscriptionStatus(profile?.subscription_status)
+  );
 
   return (
     <div className="space-y-6">
@@ -77,6 +88,7 @@ export default async function SettingsPage({
           {message.text}
         </div>
       )}
+      {!canSync && <SubscriptionNotice />}
       <GoogleConnectionCard
         locations={connections.map((connection) => ({
           id: connection.id,
