@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { SubscriptionNotice } from "@/components/billing/subscription-notice";
 import { ReviewList, type ReviewItem } from "@/components/reviews/review-list";
 import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
+import { getUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -12,17 +13,16 @@ export const metadata: Metadata = {
 export const dynamic = "force-dynamic";
 
 export default async function ReviewsPage() {
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getUser();
   if (!user) redirect("/login");
+
+  const supabase = await createClient();
 
   const [{ data, error }, { data: profile }] = await Promise.all([
     supabase
       .from("reviews")
       .select(
-        "id, author_name, rating, content, published_at, reply_text, replied_at, auto_replied, created_at"
+        "id, author_name, rating, content, published_at, reply_text, replied_at, auto_replied, posted_via, created_at"
       )
       .eq("user_id", user.id)
       .order("published_at", { ascending: false, nullsFirst: false })

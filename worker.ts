@@ -30,12 +30,17 @@ const worker = {
     ctx: CronContext
   ) {
     if (!env.CRON_SECRET) {
-      console.error("[cron] CRON_SECRET が設定されていません");
+      // 静かに落ちると「レビューが取れない」という形でしか気づけないので明示する
+      console.error(
+        "[cron] CRON_SECRET が設定されていません。レビューの自動取得は実行されません。" +
+          "`npx wrangler secret put CRON_SECRET` で登録してください"
+      );
       return;
     }
 
     const response = await handler.fetch(
       new Request("https://internal/api/reviews/sync", {
+        method: "POST",
         headers: { authorization: `Bearer ${env.CRON_SECRET}` },
       }),
       env,
@@ -43,7 +48,7 @@ const worker = {
     );
 
     const body = await response.text();
-    console.log(`[cron] /api/reviews/sync -> ${response.status} ${body}`);
+    console.log(`[cron] POST /api/reviews/sync -> ${response.status} ${body}`);
   },
 };
 

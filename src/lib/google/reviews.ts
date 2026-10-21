@@ -8,6 +8,20 @@ type ExistingReply = {
   replied_at: string | null;
 };
 
+export type SyncFailure = {
+  locationId: string;
+  locationTitle: string | null;
+  message: string;
+};
+
+export type SyncResult = {
+  imported: number;
+  locations: number;
+  failures: SyncFailure[];
+  /** 連携はあるが、すべて失効（revoked）している */
+  allRevoked: boolean;
+};
+
 /**
  * 既に保存済みの返信履歴を取得します。
  *
@@ -37,65 +51,175 @@ async function fetchExistingReplies(
   );
 }
 
-export async function syncReviews(userId: string): Promise<{
-  imported: number;
-  locations: number;
-}> {
+export async function syncReviews(userId: string): Promise<SyncResult> {
   // レビュー取得は月額サブスクリプションの特典。未契約なら何もしない
   if (!(await isSubscribed(userId))) {
-    return { imported: 0, locations: 0 };
+    return { imported: 0, locations: 0, failures: [], allRevoked: false };
   }
 
   const connections = await listConnections(userId);
-  if (connections.length === 0) {
-    return { imported: 0, locations: 0 };
+  const active = connections.filter(
+    (connection) => connection.status !== "revoked"
+  );
+
+  if (active.length === 0) {
+    return {
+      imported: 0,
+      locations: 0,
+      failures: [],
+      // 連携はあるが全て失効している。呼び出し側で再連携を促すために区別する
+      allRevoked: connections.length > 0,
+    };
   }
 
   const admin = createAdminClient();
   let imported = 0;
+  const failures: SyncFailure[] = [];
 
-  for (const connection of connections) {
-    const accessToken = await getValidAccessToken(connection);
-    const reviews = await listReviews(connection.location_id, accessToken);
+  for (const connection of active) {
+    // 1つの店舗で失敗しても、ほかの店舗は処理を続ける。
+    // 失効したトークンを持つ店舗がいても、全体の取得が止まってはいけない。
+    try {
+      const accessToken = await getValidAccessToken(connection);
+      const reviews = await listReviews(connection.location_id, accessToken);
 
-    const existingReplies = await fetchExistingReplies(
-      userId,
-      reviews.map((review) => review.name)
-    );
+      const existingReplies = await fetchExistingReplies(
+        userId,
+        reviews.map((review) => review.name)
+      );
 
-    const rows = reviews
-      .map((review) => {
-        const rating = toStarRating(review.starRating);
-        if (rating === 0) return null;
-        const existing = existingReplies.get(review.name);
-        return {
-          user_id: userId,
-          location_id: connection.location_id,
-          external_id: review.name,
-          author_name: review.reviewer?.isAnonymous
-            ? null
-            : (review.reviewer?.displayName ?? null),
-          rating,
-          content: review.comment ?? null,
-          published_at: review.createTime ?? null,
-          reply_text: review.reviewReply?.comment ?? existing?.reply_text ?? null,
-          replied_at: review.reviewReply?.updateTime ?? existing?.replied_at ?? null,
-        };
-      })
-      .filter((row) => row !== null);
+      const rows = reviews
+        .map((review) => {
+          const rating = toStarRating(review.starRating);
+          if (rating === 0) {
+            if (review.starRating) {
+              // 未知のレーティングだと無言で取りこぼすので、原因を追えるようにログを残す
+              console.warn("skipping a review with an unknown star rating", {
+                externalId: review.name,
+                starRating: review.starRating,
+              });
+            }
+            return null;
+          }
+          const existing = existingReplies.get(review.name);
+          // upsert に入れる列を「保存履歴の列」に限定している。
+          //
+          // auto_replied（マイグレーション5）/ claimed_at（6）/ posted_via（8）を
+          // ここに入れると、マイグレーションが未適用の環境では PostgREST が列を
+          // 見つけられず**リクエストごと**失敗する。すると「未返信」と誤判定されて
+          // 二重投稿につながる。upsert は列を含めない場合、更新時は既存値を保持し、
+          // 挿入時はカラムのデフォルトが使われるため、意図どおりに振る舞える。
+          return {
+            user_id: userId,
+            location_id: connection.location_id,
+            external_id: review.name,
+            author_name: review.reviewer?.isAnonymous
+              ? null
+              : (review.reviewer?.displayName ?? null),
+            rating,
+            content: review.comment ?? null,
+            published_at: review.createTime ?? null,
+            reply_text:
+              review.reviewReply?.comment ?? existing?.reply_text ?? null,
+            replied_at:
+              review.reviewReply?.updateTime ?? existing?.replied_at ?? null,
+          };
+        })
+        .filter((row) => row !== null);
 
-    if (rows.length === 0) continue;
+      if (rows.length === 0) continue;
 
-    const { error } = await admin
-      .from("reviews")
-      .upsert(rows, { onConflict: "user_id,external_id" });
+      const { error } = await admin
+        .from("reviews")
+        .upsert(rows, { onConflict: "user_id,external_id" });
 
-    if (error) {
-      throw new Error("レビューの保存に失敗しました");
+      if (error) {
+        throw new Error("レビューの保存に失敗しました");
+      }
+
+      imported += rows.length;
+    } catch (error) {
+      console.error(
+        `review sync failed for location ${connection.location_id}`,
+        error
+      );
+      failures.push({
+        locationId: connection.location_id,
+        locationTitle: connection.location_title,
+        message:
+          error instanceof Error ? error.message : "レビュー取得に失敗しました",
+      });
     }
-
-    imported += rows.length;
   }
 
-  return { imported, locations: connections.length };
+  // 失効している連携は取得を試みず、そのまま結果に残して再連携を促す
+  for (const connection of connections) {
+    if (connection.status === "revoked") {
+      failures.push({
+        locationId: connection.location_id,
+        locationTitle: connection.location_title,
+        message: "Google連携の権限が失効しています。再度連携してください",
+      });
+    }
+  }
+
+  return {
+    imported,
+    locations: connections.length,
+    failures,
+    allRevoked: false,
+  };
+}
+
+/**
+ * Googleへ投稿した返信をローカルに記録します。
+ *
+ * Googleへの投稿は取り消せません。記録に失敗するとこの行は
+ * 「未返信」のまま残り、次回の実行が**別の文を生成して
+ * 公開済みの返信を置き換える**ことになります。そこで再試行し、
+ * それでも失敗したら運用工程で分かるように大きなログを残します。
+ */
+export async function recordReply(input: {
+  reviewId: string;
+  userId?: string;
+  replyText: string;
+  autoReplied: boolean;
+}): Promise<void> {
+  const admin = createAdminClient();
+  const base = {
+    reply_text: input.replyText,
+    replied_at: new Date().toISOString(),
+    auto_replied: input.autoReplied,
+  };
+
+  const save = (payload: Record<string, unknown>) => {
+    const query = admin
+      .from("reviews")
+      .update(payload)
+      .eq("id", input.reviewId);
+    return input.userId ? query.eq("user_id", input.userId) : query;
+  };
+
+  // 出所を残す。NULL のままの返信は「取得で同期したもの」と区別する
+  const first = await save({
+    ...base,
+    posted_via: input.autoReplied ? "ai_auto" : "ai_manual",
+  });
+  if (!first.error) return;
+
+  // posted_via カラムが未適用の環境では、列が無いことが原因の可能性が高い。
+  // それ以外の原因でも、基本のペイロードで1回だけ試す。
+  console.error(
+    "failed to record a posted reply; retrying with the base payload",
+    first.error
+  );
+
+  const second = await save(base);
+  if (!second.error) return;
+
+  console.error(
+    "CRITICAL: a reply was posted to Google but could not be saved locally. " +
+      "The published reply may be overwritten by the next run.",
+    { reviewId: input.reviewId, error: second.error }
+  );
 }

@@ -11,6 +11,14 @@ function customerIdOf(
   return typeof customer === "string" ? customer : customer.id;
 }
 
+/**
+ * 削除済みユーザー向けのイベントかどうか。
+ * これは再送しても直らないので、500を返して無限リトライにせず処理を打ち切ります。
+ */
+function isMissingUser(error: { code?: string; details?: string } | null) {
+  return Boolean(error?.code === "23503" || error?.details?.includes("auth.users"));
+}
+
 export async function POST(request: Request) {
   const stripe = getStripe();
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
@@ -39,6 +47,25 @@ export async function POST(request: Request) {
 
   const admin = createAdminClient();
 
+  // Stripe は一度以上送信してくるため、同一イベントは一度だけ処理する
+  const { data: recorded, error: recordError } = await admin
+    .from("stripe_events")
+    .upsert({ id: event.id }, { onConflict: "id", ignoreDuplicates: true })
+    .select("id");
+
+  if (recordError) {
+    // 記録できない環境では重複を握りつぶして処理を続行する
+    console.error("[stripe] failed to record the event", recordError);
+  } else if (!recorded || recorded.length === 0) {
+    console.warn("[stripe] skipping a duplicate event", { id: event.id });
+    return NextResponse.json({ received: true, duplicate: true });
+  }
+
+  // 遅れて届いた古いイベントで、新しい状態を上書きしないための時刻
+  const eventAt = event.created
+    ? new Date(event.created * 1000).toISOString()
+    : new Date().toISOString();
+
   try {
     switch (event.type) {
       case "checkout.session.completed": {
@@ -59,7 +86,18 @@ export async function POST(request: Request) {
           if (session.payment_status === "paid") {
             row.subscription_status = "active";
           }
-          await admin.from("profiles").upsert(row, { onConflict: "id" });
+          const { error } = await admin
+            .from("profiles")
+            .upsert(row, { onConflict: "id" });
+
+          if (isMissingUser(error)) {
+            console.warn("[stripe] skipping an event for a deleted user", {
+              event: event.type,
+              error,
+            });
+            return NextResponse.json({ received: true, skipped: true });
+          }
+          if (error) throw error;
         }
         break;
       }
@@ -72,29 +110,89 @@ export async function POST(request: Request) {
           event.type === "customer.subscription.deleted"
             ? "canceled"
             : mapStripeSubscriptionStatus(subscription.status);
+
         const patch: Record<string, unknown> = {
           subscription_status: status,
           stripe_price_id: subscription.items.data[0]?.price.id ?? null,
+          stripe_event_created_at: eventAt,
         };
         if (customerId) patch.stripe_customer_id = customerId;
 
         const userId = subscription.metadata.user_id;
         if (userId) {
-          await admin
+          if (await isStaleEvent(admin, userId, event.created)) {
+            console.warn("[stripe] skipping an out-of-order event", {
+              event: event.type,
+              userId,
+              eventAt,
+            });
+            break;
+          }
+
+          const { error } = await admin
             .from("profiles")
             .upsert({ id: userId, ...patch }, { onConflict: "id" });
+
+          if (isMissingUser(error)) {
+            console.warn("[stripe] skipping an event for a deleted user", {
+              event: event.type,
+              error,
+            });
+            return NextResponse.json({ received: true, skipped: true });
+          }
+          if (error) throw error;
         } else if (customerId) {
-          await admin
+          const { error, count } = await admin
             .from("profiles")
             .update(patch)
             .eq("stripe_customer_id", customerId);
+
+          if (error) throw error;
+          if (count === 0) {
+            console.warn(
+              "[stripe] no profile matched the customer",
+              { customerId, event: event.type }
+            );
+          }
         }
         break;
       }
     }
-  } catch {
+  } catch (error) {
+    // 一時的な失敗は 500 を返して Stripe に再送させる
+    console.error("[stripe] handler failed", { event: event.type, error });
     return NextResponse.json({ error: "処理エラー" }, { status: 500 });
   }
 
   return NextResponse.json({ received: true });
+}
+
+/**
+ * より古いイベントが遅れて届いたかどうかを判定します。
+ * Stripe は順序を保証しないので、古い `subscription.updated` が
+ * 新しい `subscription.deleted` を上書きしないように使います。
+ */
+async function isStaleEvent(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string,
+  eventCreated?: number
+): Promise<boolean> {
+  if (!eventCreated) return false;
+
+  const { data, error } = await admin
+    .from("profiles")
+    .select("stripe_event_created_at")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[stripe] failed to read the last event time", error);
+    return false;
+  }
+
+  const previous = data?.stripe_event_created_at
+    ? new Date(data.stripe_event_created_at).getTime()
+    : 0;
+
+  return previous > eventCreated * 1000;
 }

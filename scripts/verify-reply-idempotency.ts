@@ -67,6 +67,22 @@ async function main() {
     await admin.from("gbp_connections").delete().eq("location_id", LOCATION_ID);
   }
 
+  /**
+   * レビュー取得は契約中のみ実行されるため、テスト中は契約済みにしておく。
+   */
+  async function setSubscribed(subscribed: boolean) {
+    if (subscribed) {
+      await admin
+        .from("profiles")
+        .upsert(
+          { id: USER_ID, subscription_status: "active" },
+          { onConflict: "id" }
+        );
+    } else {
+      await admin.from("profiles").delete().eq("id", USER_ID);
+    }
+  }
+
   async function seed(replyText: string | null) {
     await admin.from("reviews").upsert(
       {
@@ -95,6 +111,9 @@ async function main() {
   }
 
   try {
+    // レビュー取得は契約中のみ実行されるため、テスト中は契約済みにする
+    await setSubscribed(true);
+
     // ダミーの連携行（有効期限は未来なのでGoogleにはアクセスしない）
     await admin.from("gbp_connections").upsert(
       {
@@ -123,8 +142,22 @@ async function main() {
         },
       ],
     };
-    await syncReviews(USER_ID);
+    const syncResult = await syncReviews(USER_ID);
     const afterCase1 = await readReply();
+
+    // claimed_at（マイグレーション6）や posted_via（8）が未適用でも、
+    // upsertがこれらの列を持たないため同期そのものは失敗しないことを確認する。
+    // 列を入れると未適用環境でリクエストごと失敗し、「未返信」と誤判定される。
+    results.push(
+      check(
+        "C2: マイグレーション未適用でも同期が失敗しない",
+        syncResult.failures.length === 0 && syncResult.imported >= 1,
+        `imported=${syncResult.imported} failures=${JSON.stringify(
+          syncResult.failures
+        )}`
+      )
+    );
+
     results.push(
       check(
         "C2: GBPがreviewReplyを含まない場合、既存のreply_textが保持される",
@@ -221,6 +254,7 @@ async function main() {
   } finally {
     globalThis.fetch = originalFetch;
     await cleanup();
+    await setSubscribed(false);
     console.log("\n--- テストデータを削除しました ---");
   }
 

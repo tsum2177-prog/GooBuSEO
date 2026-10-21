@@ -13,6 +13,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
+import { getUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -46,11 +47,10 @@ export default async function DashboardPage({
   searchParams: Promise<{ checkout?: string }>;
 }) {
   const { checkout } = await searchParams;
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getUser();
   if (!user) redirect("/login");
+
+  const supabase = await createClient();
 
   const [{ data: profile }, { data: settings }, { data: recentReviews }] =
     await Promise.all([

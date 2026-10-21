@@ -20,6 +20,7 @@ import { DisconnectButton } from "@/components/settings/disconnect-button";
 export type ConnectedLocation = {
   id: string;
   title: string | null;
+  status: "active" | "revoked";
 };
 
 const initialState: SettingsActionState = { status: "success", message: "" };
@@ -36,6 +37,10 @@ export function GoogleConnectionCard({
     initialState
   );
 
+  const revokedCount = locations.filter(
+    (location) => location.status === "revoked"
+  ).length;
+
   return (
     <Card>
       <CardHeader>
@@ -50,6 +55,16 @@ export function GoogleConnectionCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {revokedCount > 0 && (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <p className="font-medium">Google連携の権限が失効しています</p>
+            <p className="mt-1">
+              {revokedCount}件の店舗でアクセス権が失効しました。
+              下の「Googleマップと連携する」からGoogleに再ログインすると、
+              連携が更新されます。リンクできる店舗に無い場合は「連携を解除」で削除してください。
+            </p>
+          </div>
+        )}
         {!googleConfigured ? (
           <p className="text-sm text-muted-foreground">
             Google連携用の設定がまだ完了していません。管理者による設定が必要です。
@@ -74,30 +89,41 @@ export function GoogleConnectionCard({
                   key={location.id}
                   className="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2"
                 >
-                  <span className="text-sm font-medium">
+                  <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
                     {location.title ?? location.id}
+                    {location.status === "revoked" && (
+                      <Badge variant="destructive">再連携が必要</Badge>
+                    )}
                   </span>
                   <DisconnectButton connectionId={location.id} />
                 </li>
               ))}
             </ul>
-            <form action={formAction} className="flex items-center gap-3">
-              <Button type="submit" variant="outline" disabled={pending}>
-                <RefreshCw />
-                {pending ? "取得中..." : "レビューを取得する"}
-              </Button>
-              {state.message && (
-                <span
-                  className={
-                    state.status === "error"
-                      ? "text-sm text-destructive"
-                      : "text-sm text-muted-foreground"
-                  }
-                >
-                  {state.message}
-                </span>
-              )}
-            </form>
+            <div className="flex flex-wrap items-center gap-3">
+              <a
+                href="/api/google/oauth/start"
+                className={buttonVariants({ variant: "outline", className: "inline-flex" })}
+              >
+                Googleマップと再連携する
+              </a>
+              <form action={formAction} className="flex items-center gap-3">
+                <Button type="submit" variant="outline" disabled={pending}>
+                  <RefreshCw />
+                  {pending ? "取得中..." : "レビューを取得する"}
+                </Button>
+              </form>
+            </div>
+            {state.message && (
+              <span
+                className={
+                  state.status === "error"
+                    ? "text-sm text-destructive"
+                    : "text-sm text-muted-foreground"
+                }
+              >
+                {state.message}
+              </span>
+            )}
           </>
         )}
       </CardContent>

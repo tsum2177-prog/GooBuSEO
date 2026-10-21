@@ -4,6 +4,7 @@ import { SubscriptionNotice } from "@/components/billing/subscription-notice";
 import { GoogleConnectionCard } from "@/components/settings/google-connection-card";
 import { ShopSettingsForm } from "@/components/settings/shop-settings-form";
 import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
+import { getUser } from "@/lib/auth";
 import { listConnections } from "@/lib/google/connections";
 import { isGoogleConfigured } from "@/lib/google/oauth";
 import { createClient } from "@/lib/supabase/server";
@@ -44,11 +45,10 @@ export default async function SettingsPage({
   searchParams: Promise<{ google?: string }>;
 }) {
   const { google } = await searchParams;
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  const user = await getUser();
   if (!user) redirect("/login");
+
+  const supabase = await createClient();
 
   const [{ data: settings }, connections, { data: profile }] =
     await Promise.all([
@@ -93,10 +93,13 @@ export default async function SettingsPage({
         locations={connections.map((connection) => ({
           id: connection.id,
           title: connection.location_title,
+          status: connection.status,
         }))}
         googleConfigured={isGoogleConfigured()}
       />
       <ShopSettingsForm
+        // サーバー側で整形された値と一致させるため、保存後にキーが変わったら作り直す
+        key={JSON.stringify(settings)}
         initial={{
           shopName: settings?.shop_name ?? "",
           category: settings?.category ?? "",

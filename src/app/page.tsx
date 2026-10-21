@@ -12,7 +12,7 @@ import { Faq } from "@/components/landing/faq";
 import { ReviewProof } from "@/components/landing/review-proof";
 import { SiteHeader } from "@/components/landing/site-header";
 import { Button } from "@/components/ui/button";
-import { createClient } from "@/lib/supabase/server";
+import { getUser } from "@/lib/auth";
 import { fetchPriceLabel } from "@/lib/stripe";
 
 export const metadata: Metadata = {
@@ -95,7 +95,32 @@ const faqItems = [
   {
     question: "店舗は複数登録できますか？",
     answer:
-      "はい。1つのアカウントで複数の店舗を連携できます。Googleマップとの接続時に、お使いのアカウントで管理しているすべての店舗が自動登録されます。",
+      "はい。1つのアカウントで複数の店舗を連携できます。Googleマップとの接続時に、お使いのアカウントで管理しているすべての店舗が自動登録されます。店舗数が多くても取りこぼしません。",
+  },
+  {
+    question: "返信を1回に何件まで投稿しますか？",
+    answer:
+      "自動返信は1回の実行につき最大20件まで投稿します。残りは次の実行に回ります。1時間ごとに自動で実行されるため、件数が多くても1日で少しずつ追いつきます。",
+  },
+  {
+    question: "「AIが作成した返信」と「AIが自動で作成した返信」は何が違いますか？",
+    answer:
+      "お手元で「AI返信を作成して投稿」を押したものが前者、自動返信スイッチがONの状態で自動で投稿されたものが後者です。AIが書いたものではない返信にはラベルを表示しません。",
+  },
+  {
+    question: "自分でGoogleマップに返信を書いたらどうなりますか？",
+    answer:
+      "最後の取得以降にご自身で返信を書いた場合、レビュー返信AIが上書きしてしまわないよう、投稿を中止します。そのレビューは「返信済み」として扱われます。",
+  },
+  {
+    question: "AIが書いた文は、そのまま公開されますか？",
+    answer:
+      "はい。生成された文はそのままGoogleマップの返信として公開されます。自動投稿を避けたい場合は、自動返信スイッチをOFFにしたまま手動で投稿してください。URLや記号、装飾が入らないよう整えてから投稿します。",
+  },
+  {
+    question: "うまくいかなかったときはどうすればよいですか？",
+    answer:
+      "操作の途中でエラーが出た場合は、エラー画面の「もう一度試す」を押してください。ページの表示に失敗した場合もエラー画面に移動します。続かない場合はお問い合わせください。",
   },
   {
     question: "Googleマップとの接続に制約はありますか？",
@@ -105,13 +130,10 @@ const faqItems = [
 ];
 
 export default async function Home() {
-  const [supabase, priceLabel] = await Promise.all([
-    createClient(),
+  const [user, priceLabel] = await Promise.all([
+    getUser(),
     fetchPriceLabel(),
   ]);
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
   const isLoggedIn = Boolean(user);
 
   return (

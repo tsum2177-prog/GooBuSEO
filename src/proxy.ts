@@ -1,6 +1,9 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
+/** 認証必須のルート。`/dashboard-foo` のような類似パスに誤って当たらないよう、境界で判定する */
+const PROTECTED_ROUTES = ["/dashboard", "/settings", "/reviews"];
+
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
@@ -30,7 +33,9 @@ export async function proxy(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
-  const isProtected = pathname.startsWith("/dashboard");
+  const isProtected = PROTECTED_ROUTES.some(
+    (route) => pathname === route || pathname.startsWith(`${route}/`)
+  );
   const isAuthPage = pathname === "/login" || pathname === "/signup";
 
   if (isProtected && !user) {
@@ -51,7 +56,9 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
+  // Stripe webhookとレビュー同期APIはCookieセッションを使わないため、
+  // 認証チェックとトークン更新の対象から除外する。
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|map)$).*)",
+    "/((?!api/stripe/webhook|api/reviews/sync|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico|txt|map|xml|css|js|woff|woff2)$).*)",
   ],
 };

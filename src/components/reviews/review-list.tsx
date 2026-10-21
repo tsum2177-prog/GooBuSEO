@@ -19,8 +19,25 @@ export type ReviewItem = {
   reply_text: string | null;
   replied_at: string | null;
   auto_replied: boolean;
+  posted_via: string | null;
   created_at: string;
 };
+
+/**
+ * 返信の出所を返します。
+ *
+ * `posted_via` が無い（取得で同期したもの）場合、AIが書いたかは判断できないので
+ * ラベルを出さず、誤って「AIが作成した返信」と呼ばないようにします。
+ * 旧データは `auto_replied` から復元します。
+ */
+function replySourceLabel(review: {
+  posted_via: string | null;
+  auto_replied: boolean;
+}): string | null {
+  if (review.posted_via === "ai_auto") return "AIが自動で作成した返信";
+  if (review.posted_via === "ai_manual") return "AIが作成した返信";
+  return review.auto_replied ? "AIが自動で作成した返信" : null;
+}
 
 export function StarRating({ rating }: { rating: number }) {
   return (
@@ -97,9 +114,11 @@ export function ReviewList({
                 )}
                 {review.reply_text && (
                   <div className="space-y-1 border-l-2 border-border pl-3">
-                    <p className="text-xs font-medium text-muted-foreground">
-                      {review.auto_replied ? "AIが自動で作成した返信" : "AIが作成した返信"}
-                    </p>
+                    {replySourceLabel(review) && (
+                      <p className="text-xs font-medium text-muted-foreground">
+                        {replySourceLabel(review)}
+                      </p>
+                    )}
                     <p className="text-sm leading-relaxed">{review.reply_text}</p>
                   </div>
                 )}

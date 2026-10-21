@@ -2,7 +2,6 @@ import { randomBytes } from "node:crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { buildAuthUrl, isGoogleConfigured } from "@/lib/google/oauth";
-import { getOrigin } from "@/lib/origin";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET() {
@@ -26,6 +25,5 @@ export async function GET() {
     path: "/",
   });
 
-  const origin = await getOrigin();
-  redirect(buildAuthUrl({ origin, state }));
+  redirect(buildAuthUrl({ state }));
 }

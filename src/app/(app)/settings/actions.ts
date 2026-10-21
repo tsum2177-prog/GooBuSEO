@@ -6,14 +6,13 @@ import { isSubscribed, SUBSCRIPTION_REQUIRED_MESSAGE } from "@/lib/billing";
 import { deleteConnection } from "@/lib/google/connections";
 import { autoReplyPendingReviews } from "@/lib/google/auto-reply";
 import { syncReviews } from "@/lib/google/reviews";
+import { parseSeoKeywords } from "@/lib/seo-keywords";
 import { createClient } from "@/lib/supabase/server";
 
 export type SettingsActionState = {
   status: "success" | "error";
   message: string;
 };
-
-const MAX_KEYWORDS = 20;
 
 export async function saveShopSettings(
   _prevState: SettingsActionState,
@@ -34,11 +33,9 @@ export async function saveShopSettings(
   const strengths = String(formData.get("strengths") ?? "")
     .trim()
     .slice(0, 2000);
-  const seoKeywords = String(formData.get("seo_keywords") ?? "")
-    .split(",")
-    .map((keyword) => keyword.trim())
-    .filter(Boolean)
-    .slice(0, MAX_KEYWORDS);
+  const seoKeywords = parseSeoKeywords(
+    String(formData.get("seo_keywords") ?? "")
+  );
   const autoReplyEnabled = formData.get("auto_reply_enabled") === "on";
 
   const { error } = await supabase.from("shop_settings").upsert(
@@ -77,33 +74,62 @@ export async function syncReviewsAction(): Promise<SettingsActionState> {
     return { status: "error", message: SUBSCRIPTION_REQUIRED_MESSAGE };
   }
 
+  let imported = 0;
+  let locations = 0;
+  let allRevoked = false;
+  let failures: { locationTitle: string | null; message: string }[] = [];
+
   try {
-    const { imported, locations } = await syncReviews(user.id);
-    const auto = await autoReplyPendingReviews(user.id);
-    revalidatePath("/reviews");
-    revalidatePath("/dashboard");
-
-    if (locations === 0) {
-      return {
-        status: "error",
-        message: "Googleマップがまだ連携されていません。先に連携してください。",
-      };
-    }
-
-    return {
-      status: "success",
-      message:
-        `${locations}件の店舗から${imported}件のレビューを取得しました。` +
-        (auto.replied > 0 ? `自動返信を${auto.replied}件投稿しました。` : ""),
-    };
+    const result = await syncReviews(user.id);
+    imported = result.imported;
+    locations = result.locations;
+    failures = result.failures;
+    allRevoked = result.allRevoked;
   } catch (error) {
     console.error("review sync failed", error);
     return {
       status: "error",
-      message:
-        "レビューを取得できませんでした。時間をおいて再度お試しください。",
+      message: "レビューを取得できませんでした。時間をおいて再度お試しください。",
     };
   }
+
+  // 取得に失敗した店舗があっても、自動返信の処理は続行する
+  let replied = 0;
+  try {
+    const auto = await autoReplyPendingReviews(user.id);
+    replied = auto.replied;
+  } catch (error) {
+    console.error("auto reply failed", error);
+  }
+
+  revalidatePath("/reviews");
+  revalidatePath("/dashboard");
+
+  if (locations === 0) {
+    return {
+      status: "error",
+      message: allRevoked
+        ? "Google連携の権限が失効しています。下の「Googleマップと再連携する」から再度連携してください。"
+        : "Googleマップがまだ連携されていません。先に連携してください。",
+    };
+  }
+
+  if (failures.length > 0) {
+    const names = failures
+      .map((failure) => failure.locationTitle ?? failure.message)
+      .join("、");
+    return {
+      status: "error",
+      message: `${locations}件の店舗のうち${failures.length}件で取得に失敗しました（${names}）。Google連携の権限が失効している場合は「店舗設定」で再度連携してください。`,
+    };
+  }
+
+  return {
+    status: "success",
+    message:
+      `${locations}件の店舗から${imported}件のレビューを取得しました。` +
+      (replied > 0 ? `自動返信を${replied}件投稿しました。` : ""),
+  };
 }
 
 export async function disconnectGoogleAction(

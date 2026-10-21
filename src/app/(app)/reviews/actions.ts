@@ -7,10 +7,10 @@ import {
   isSubscribed,
   SUBSCRIPTION_REQUIRED_MESSAGE,
 } from "@/lib/billing";
-import { replyToReview } from "@/lib/google/business";
+import { replyToReview, getReviewReply } from "@/lib/google/business";
 import { getValidAccessToken, listConnections } from "@/lib/google/connections";
+import { recordReply } from "@/lib/google/reviews";
 import { claimReviews, releaseReviewClaim } from "@/lib/review-claims";
-import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export type ReplyActionState = {
@@ -75,6 +75,14 @@ export async function generateAndPostReply(
     };
   }
 
+  if (connection.status === "revoked") {
+    return {
+      status: "error",
+      message:
+        "Google連携の権限が失効しています。「店舗設定」から再度連携してください。",
+    };
+  }
+
   // 同時に走った自動処理と対象が重ならないよう、排他的に確保する
   const claimedIds = await claimReviews(user.id, [review.id]);
   if (!claimedIds.includes(review.id)) {
@@ -102,18 +110,27 @@ export async function generateAndPostReply(
     });
 
     const accessToken = await getValidAccessToken(connection);
+
+    // 投稿する前に、Google側にすでに返信があるかを確認する。
+    // 最後の同期以降に、店主がGoogleマップ上で直接返信している可能性がある。
+    const remoteReply = await getReviewReply(review.external_id, accessToken);
+    if (remoteReply?.comment) {
+      await releaseReviewClaim(review.id);
+      return {
+        status: "error",
+        message:
+          "このレビューにはGoogleマップ上すでに返信があります。上書きするとそちらが消えるため、投稿を中止しました。",
+      };
+    }
+
     await replyToReview(review.external_id, replyText, accessToken);
 
-    const admin = createAdminClient();
-    await admin
-      .from("reviews")
-      .update({
-        reply_text: replyText,
-        replied_at: new Date().toISOString(),
-        auto_replied: false,
-      })
-      .eq("id", review.id)
-      .eq("user_id", user.id);
+    await recordReply({
+      reviewId: review.id,
+      userId: user.id,
+      replyText,
+      autoReplied: false,
+    });
 
     revalidatePath("/reviews");
     revalidatePath("/dashboard");

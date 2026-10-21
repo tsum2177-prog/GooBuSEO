@@ -232,12 +232,103 @@ create trigger reviews_preserve_reply
 commit;
 
 
+-- ---------- 20261020120500_add_connection_status.sql ----------
+-- Google連携の失効状態を管理する status カラムを追加
+begin;
+
+alter table public.gbp_connections
+  add column if not exists status text not null default 'active';
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'gbp_connections_status_check'
+      and conrelid = 'public.gbp_connections'::regclass
+  ) then
+    alter table public.gbp_connections
+      add constraint gbp_connections_status_check
+      check (status in ('active', 'revoked'));
+  end if;
+end
+$$;
+
+commit;
+
+
+-- ---------- 20261020120600_limit_gbp_connections_grant.sql ----------
+-- gbp_connections の暗号化トークン列を、本人ブラウザから読めないようにする
+begin;
+
+revoke select on public.gbp_connections from authenticated;
+
+grant select (
+  id,
+  user_id,
+  google_account_id,
+  google_account_name,
+  location_id,
+  location_title,
+  status,
+  created_at,
+  updated_at
+) on public.gbp_connections to authenticated;
+
+commit;
+
+
+-- ---------- 20261020120700_create_stripe_events.sql ----------
+-- Stripe webhook の重複処理を防ぐテーブルと、遅延イベントで上書きしないための列
+begin;
+
+create table if not exists public.stripe_events (
+  id text primary key,
+  created_at timestamptz not null default now()
+);
+
+alter table public.stripe_events enable row level security;
+
+alter table public.profiles
+  add column if not exists stripe_event_created_at timestamptz;
+
+commit;
+
+
+-- ---------- 20261020120800_add_reply_source.sql ----------
+-- 返信の「出所」を記録する posted_via 列を追加
+begin;
+
+alter table public.reviews
+  add column if not exists posted_via text;
+
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint
+    where conname = 'reviews_posted_via_check'
+      and conrelid = 'public.reviews'::regclass
+  ) then
+    alter table public.reviews
+      add constraint reviews_posted_via_check
+      check (posted_via in ('ai_manual', 'ai_auto'));
+  end if;
+end
+$$;
+
+commit;
+
+
 -- ============================================================
--- 実行結果の確認（shop_settings に category / auto_reply_enabled、
--- reviews に auto_replied / claimed_at が表示されていれば成功です）
+-- 実行結果の確認
+--   shop_settings: category / auto_reply_enabled
+--   reviews: auto_replied / claimed_at / posted_via
+--   gbp_connections: status
+--   profiles: stripe_event_created_at
+--   stripe_events テーブル
+--   が表示されていれば成功です。
 -- ============================================================
 select table_name, column_name
 from information_schema.columns
 where table_schema = 'public'
-  and table_name in ('profiles', 'shop_settings', 'reviews', 'gbp_connections')
+  and table_name in ('profiles', 'shop_settings', 'reviews', 'gbp_connections', 'stripe_events')
 order by table_name, column_name;

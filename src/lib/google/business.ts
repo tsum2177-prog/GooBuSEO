@@ -26,6 +26,14 @@ export type GoogleLocation = {
   title?: string;
 };
 
+const MAX_PAGE_SIZE = 100;
+
+function buildPageParams(pageToken?: string): string {
+  const params = new URLSearchParams({ pageSize: String(MAX_PAGE_SIZE) });
+  if (pageToken) params.set("pageToken", pageToken);
+  return params.toString();
+}
+
 async function googleFetch<T>(
   path: string,
   accessToken: string,
@@ -50,22 +58,45 @@ async function googleFetch<T>(
 export async function listAccounts(
   accessToken: string
 ): Promise<GoogleAccount[]> {
-  const data = await googleFetch<{ accounts?: GoogleAccount[] }>(
-    "/accounts",
-    accessToken
-  );
-  return data.accounts ?? [];
+  const accounts: GoogleAccount[] = [];
+  let pageToken: string | undefined;
+
+  do {
+    const data = await googleFetch<{
+      accounts?: GoogleAccount[];
+      nextPageToken?: string;
+    }>(`/accounts?${buildPageParams(pageToken)}`, accessToken);
+
+    accounts.push(...(data.accounts ?? []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return accounts;
 }
 
 export async function listLocations(
   accountName: string,
   accessToken: string
 ): Promise<GoogleLocation[]> {
-  const data = await googleFetch<{ locations?: GoogleLocation[] }>(
-    `/${accountName}/locations`,
-    accessToken
-  );
-  return data.locations ?? [];
+  const locations: GoogleLocation[] = [];
+  let pageToken: string | undefined;
+
+  // Googleのデフォルトは1リクエストあたり約10件なので、
+  // 取りこぼさないよう nextPageToken が無くなるまで回します。
+  do {
+    const data = await googleFetch<{
+      locations?: GoogleLocation[];
+      nextPageToken?: string;
+    }>(
+      `/${accountName}/locations?${buildPageParams(pageToken)}`,
+      accessToken
+    );
+
+    locations.push(...(data.locations ?? []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+
+  return locations;
 }
 
 export async function listReviews(
@@ -82,6 +113,20 @@ export async function listReviews(
     accessToken
   );
   return data.reviews ?? [];
+}
+
+/**
+ * レビューに既に付いている返信を取得します。
+ * 投稿する前に、店主がGoogleマップ上で直接返信していないかを確認するために使います。
+ */
+export async function getReviewReply(
+  reviewName: string,
+  accessToken: string
+): Promise<{ comment?: string; updateTime?: string } | null> {
+  const data = await googleFetch<{
+    reviewReply?: { comment?: string; updateTime?: string };
+  }>(`/${reviewName}/reply`, accessToken);
+  return data.reviewReply ?? null;
 }
 
 export async function replyToReview(

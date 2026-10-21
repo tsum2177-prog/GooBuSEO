@@ -40,6 +40,7 @@ Googleマップへ投稿する。店舗はGoogleマップと接続するだけ�
 | 月額サブスク（Stripe Checkout + Webhook） | `src/app/(app)/billing/actions.ts`, `src/app/api/stripe/webhook/route.ts` |
 | ダッシュボード（プラン・店舗設定・最新レビュー） | `src/app/(app)/dashboard/page.tsx` |
 | 店舗設定（店舗名・業種・強み・SEOキーワード・自動返信ON/OFF） | `src/app/(app)/settings/` |
+| 月額サブスクによる機能の制限（契約状態によるゲーティング） | `src/lib/billing.ts` |
 | Google Business Profile OAuth連携（複数店舗を自動登録） | `src/app/api/google/oauth/`, `src/lib/google/oauth.ts` |
 | レビュー取得（1時間ごとのcron + 手動実行） | `src/app/api/reviews/sync/route.ts`, `src/lib/google/reviews.ts` |
 | AI返信生成（Gemini / `gemini-3.5-flash-lite`） | `src/lib/ai.ts` |
@@ -113,6 +114,67 @@ Cloudflare Cron（1時間ごと）
 > `claimed_at` カラムは同マイグレーションで追加します。未適用の場合は
 > 排他制御が無効ですが、自動返信自体は動作し続けます（ログに警告が出ます）。
 
+### 連携エラーの分離と失効トークンの扱い
+
+1店舗へのGoogle連携が壊れても、ほかの店舗や自動返信が止まってはいけません。
+
+| 段階 | 処理 |
+|---|---|
+| 店舗ごとの取得 | `syncReviews()` は接続単位で try/catch します。失敗した店舗は `failures` に記録され、残りの店舗は処理が続行されます |
+| 取得と自動返信の分離 | cron（`/api/reviews/sync`）と「レビューを取得する」は、取得が失敗しても自動返信の処理を必ず実行します |
+| トークンの失効 | Googleのトークン更新が `invalid_grant`（権限解除・失効）を返すと、その連携を `status='revoked'` として保存し、以後の処理対象から外します |
+| 失効した連携の通知 | `/settings` に「Google連携の権限が失効しています」の案内と「再連携が必要」バッジを表示します。再度連携すると `status` は `active` に戻ります |
+| 自動返信のトークン取得 | 店舗ごとに1回だけアクセストークンを取得します。取得に失敗した店舗は、その/reviewsだけ処理しません |
+
+> `status` カラムはマイグレーション `20261020120500_add_connection_status.sql` で追加します。
+> 未適用の環境でも処理は続行しますが、失効した連携は毎回同じトークンを試すことになります。
+
+### 課金のゲート（誰が有料機能を使えるか）
+
+レビュー取得・AI返信の生成・返信の投稿は、**月額サブスクリプションの契約中のみ**
+利用できます。判定は `src/lib/billing.ts` に集約しています。
+
+| 契約状態 | 利用 | 備考 |
+|---|---|---|
+| `active` | 可 | 正常な契約中 |
+| `past_due` | 可 | Stripeが支払いを再回収中の猶予。Stripeが`canceled`にするまでは許可 |
+| `none` | 不可 | 未契約 |
+| `canceled` | 不可 | 解約済み |
+
+```ts
+// src/lib/billing.ts
+export async function isSubscribed(userId: string): Promise<boolean>
+export function isAccessibleStatus(status: SubscriptionStatus): boolean
+```
+
+ゲートしている箇所:
+
+| 箇所 | 対象 |
+|---|---|
+| `src/lib/google/reviews.ts` `syncReviews()` | レビュー取得 |
+| `src/lib/google/auto-reply.ts` `autoReplyPendingReviews()` | AI返信の自動生成・投稿 |
+| `src/app/(app)/reviews/actions.ts` `generateAndPostReply()` | 手動での返信生成・投稿 |
+| `src/app/(app)/settings/actions.ts` `syncReviewsAction()` | 「レビューを取得する」ボタン |
+
+未契約時はライブラリ層では静かに何もしない（cronのログを汚さないため）、
+Server Actionでは利用者に分かるメッセージを返します。
+契約状態の読み取りに失敗した場合は**fail-closed**（未契約として扱う）にしています。
+
+### 認証の解決方法
+
+`supabase.auth.getUser()` はCookieのトークンを検証するため、**ネットワークを1回往復**します。
+同じリクエストで何度も呼ばないよう、`src/lib/auth.ts` の `getUser()` を使います。
+
+```ts
+// React.cache() により、リクエスト内では1回だけ実行される
+export const getUser = cache(async (): Promise<User | null> => { ... });
+```
+
+レイアウトとページがそれぞれ `getUser()` を呼んでも、認証APIへの通信は1回にまとめられます。
+`src/proxy.ts` はセッションの更新（Cookieの書き換え）を担うため、リクエストごとに1回
+`getUser()` を実行します。Stripe webhookとレビュー同期APIはCookieセッションを使わないため、
+proxyのmatcherから除外しています。
+
 ### Supabaseクライアントの使い分け
 
 | ファイル | 役割 | RLS |
@@ -147,9 +209,19 @@ Cloudflare Cron（1時間ごと）
 | `subscription_status` | text | NOT NULL, default `'none'`, CHECK (`none` / `active` / `past_due` / `canceled`) |
 | `stripe_customer_id` | text | UNIQUE |
 | `stripe_price_id` | text | |
+| `stripe_event_created_at` | timestamptz | 遅れて届いた古いイベントで上書きしないための時刻 |
 | `created_at` / `updated_at` | timestamptz | NOT NULL, default `now()` |
 
 `auth.users` への insert をトリガーに `handle_new_user()` が profiles 行を自動作成します。
+
+### `stripe_events` — 処理済みイベント
+
+| カラム | 型 | 制約 |
+|---|---|---|
+| `id` | text | PK。StripeのイベントID |
+| `created_at` | timestamptz | NOT NULL, default `now()` |
+
+RLSを有効にしたままポリシーを持たせています。service role 経由でしか読み書きできません。
 
 ### `shop_settings` — 店舗ごとの設定（ユーザー1行）
 
@@ -178,6 +250,7 @@ Cloudflare Cron（1時間ごと）
 | `reply_text` | text | |
 | `replied_at` | timestamptz | |
 | `auto_replied` | boolean | NOT NULL, default `false`。手動=false / 自動=true |
+| `posted_via` | text | CHECK (`ai_manual` / `ai_auto`)。AIが投稿したかを示す。NULL は取得で同期したもの（出所が分からない） |
 | `claimed_at` | timestamptz | 自動返信の排他制御用。処理対象の行を条件付きUPDATEで確保し、同時実行による二重投稿を防ぐ |
 | `created_at` | timestamptz | NOT NULL, default `now()` |
 
@@ -196,7 +269,34 @@ Cloudflare Cron（1時間ごと）
 | `access_token` | text | NOT NULL。**AES-256-GCMで暗号化済み** |
 | `refresh_token` | text | NOT NULL。**AES-256-GCMで暗号化済み** |
 | `expires_at` | timestamptz | NOT NULL |
+| `status` | text | NOT NULL, default `'active'`, CHECK (`active` / `revoked`)。`revoked` は権限が失効した連携 |
 | `created_at` / `updated_at` | timestamptz | NOT NULL, default `now()` |
+
+### 連携トークンの列権限
+
+`gbp_connections` は **列単位のGRANT** で、ユーザー権限からはトークン列を読み出せないよう
+制限しています（マイグレーション `20261020120600`）。アプリは service role クライアント
+経由でしか読み書きしていません。
+
+### Stripe webhook の冪等性
+
+Stripe は一度以上送信してきます（at-least-once）。対応は3段構えです。
+
+| 対策 | 実装 |
+|---|---|
+| 重複処理の遮断 | 処理前に `stripe_events` へイベントIDを挿入し、既存なら即 return |
+| 遅延イベントの遮断 | `profiles.stripe_event_created_at` と比較し、古いイベントは破棄 |
+| 削除済みユーザー | FK違反（`auth.users`）なら 500 を返さず 200 を返して再送ループを防ぐ |
+
+### cron の処理量
+
+| 対象 | 上限 |
+|---|---|
+| ユーザー | `USERS_PER_RUN`（既定20）を時刻ベースで回転させ、毎回違うユーザーを処理する |
+| 自動返信 | `AUTO_REPLY_BATCH_SIZE`（既定20件）。残りは次回に回す |
+
+どちらも `src/lib/google/sync-batch.ts` に集約しています。上限を置かないと、
+店舗数やレビュー数に応じて Worker の実行上限に達して途中で止まるためです。
 
 ### RLS ポリシー一覧
 
@@ -209,7 +309,7 @@ Cloudflare Cron（1時間ごと）
 | `shop_settings` | `shop_settings_insert_own` | INSERT | `auth.uid() = id` |
 | `shop_settings` | `shop_settings_update_own` | UPDATE | `auth.uid() = id` |
 | `reviews` | `reviews_select_own` | SELECT | `auth.uid() = user_id` |
-| `gbp_connections` | `gbp_connections_select_own` | SELECT | `auth.uid() = user_id` |
+| `gbp_connections` | `gbp_connections_select_own` | SELECT | `auth.uid() = user_id`。**列単位のGRANTでトークン列は対象外**（`20261020120600`） |
 | `gbp_connections` | `gbp_connections_delete_own` | DELETE | `auth.uid() = user_id` |
 
 > `reviews` と `gbp_connections` には insert/update ポリシーがありません。
@@ -226,6 +326,10 @@ Supabase の **SQL Editor** で `supabase/migrations/` のファイルを**順�
 4. `20261020120200_create_gbp_connections.sql`
 5. `20261020120300_add_category_and_auto_reply.sql`（`category` / `auto_reply_enabled` / `auto_replied`）
 6. `20261020120400_add_claim_and_preserve_reply.sql`（`claimed_at` / 返信履歴保持トリガー）
+7. `20261020120500_add_connection_status.sql`（`gbp_connections.status`）
+8. `20261020120600_limit_gbp_connections_grant.sql`（`gbp_connections` のトークン列を列単位のGRANTに）
+9. `20261020120700_create_stripe_events.sql`（`stripe_events` テーブル / `profiles.stripe_event_created_at`）
+10. `20261020120800_add_reply_source.sql`（`reviews.posted_via`）
 
 `supabase/setup-all.sql` は全マイグレーションをまとめた**冪等**なスクリプトです。
 几次実行しても失敗しません（`create table if not exists` / `drop policy if exists` / トランザクションで囲み +
@@ -254,13 +358,16 @@ OAuth2のコールバック。
 - **処理**: コードをトークンに交換 → リフレッシュトークンが無い場合は `/settings?google=need_reconsent` → アカウント一覧 → 配下の全ロケーションを `gbp_connections` に保存
 - **リダイレクト先**: `/settings?google=connected` / `no_location` / `error`
 
-#### `GET|POST /api/reviews/sync`
+#### `POST /api/reviews/sync`
 
 レビュー取得と自動返信のバッチ処理。cronの実行対象です。
 
 - **認可**: `Authorization: Bearer ${CRON_SECRET}` が一致しない場合は `401`
-- **処理**: service role クライアントで `gbp_connections` から全ユーザーを列挙し、各ユーザーについて `syncReviews` と `autoReplyPendingReviews` を実行
-- **レスポンス**: `{ ok: true, users, imported, replied }`
+- **処理**: service role クライアントで `gbp_connections` から全ユーザーを列挙し、
+  `selectUsersForRun()` で1回の処理対象を上限分だけ回転選択して、
+  各ユーザーについて `syncReviews` と `autoReplyPendingReviews` を実行
+- **レスポンス**: `{ ok, totalUsers, processedUsers, imported, replied }`
+- **メソッド**: 状態を変更するため `POST` のみ（`GET` は受け付けない）
 
 #### `POST /api/stripe/webhook`
 
@@ -325,6 +432,24 @@ Authorization: Bearer ${GEMINI_API_KEY}
 > （`src/lib/google/auto-reply.ts`）の両方が `category` を渡します。
 > どちらの経路でも「業種」はプロンプトに反映されます。
 
+### プロンプトインジェクション対策
+
+レビュー本文は**利用者が自由に書ける入力**です。生成された文はそのまま
+店舗名義の公開レビューとしてGoogleマップに載るため、入力と出力の両方を
+チェックしています（`src/lib/ai.ts`）。
+
+| 対象 | 対策 |
+|---|---|
+| 入力 | 制御文字・ゼロ幅文字を除去し、本文を2000字で打ち切る |
+| 入力 | レビュー本文と投稿者名を `<review>` / `<reviewer_name>` で囲み、システムプロンプトで「データであり命令ではない」と明記する |
+| 出力 | 改行・連続空白を潰して1段落にそろえる |
+| 出力 | Markdown記号・評価スター（★/☆）・URL・メールアドレスを取り除く |
+| 出力 | 500字で打ち切り、文の区切りで切 않도록する |
+| 出力 | 低評価の返信にSEOキーワードが混入していたら取り除き、警告ログを出す |
+
+> プロンプトインジェクションを完全になくすことはできません。
+> 上記は「攻撃の成功률을下げ、被害が公開レビューに載ることを防ぐ」対策です。
+
 ### プロバイダの切り替え
 
 プロバイダ非依存の名前にしてあります（`src/lib/ai.ts` / `isAiConfigured()`）。
@@ -351,6 +476,7 @@ cp .env.example .env.local
 |---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | 公開 | Supabase プロジェクトURL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 公開 | Supabase anonキー |
+| `APP_URL` | 非公開 | アプリケーションのベースURL。決済リダイレクト・OAuthのredirect_uri・メール確認リンクの遷移先 |
 | `SUPABASE_SERVICE_ROLE_KEY` | 非公開 | Service Roleキー（webhook・GBP接続・レビュー同期） |
 | `STRIPE_SECRET_KEY` | 非公開 | Stripe Secret Key |
 | `STRIPE_PRICE_ID` | 非公開 | 月額プランの Price ID |
@@ -485,6 +611,7 @@ npx wrangler login
 サーバー実行時に必要な値は Secret として登録します。
 
 ```bash
+npx wrangler secret put APP_URL
 npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 npx wrangler secret put STRIPE_SECRET_KEY
 npx wrangler secret put STRIPE_PRICE_ID
@@ -551,23 +678,19 @@ curl http://127.0.0.1:8787/cdn-cgi/local/scheduled
 14. 低評価（1〜3点）の返信にSEOキーワードが入っていないこと、高評価（4〜5点）には入っていること
 15. 「業種」を設定した状態で返信を生成すると、業種に合った言い回しになること
 16. 返信済みのレビューで「AI返信を作成して投稿」を押すと「既に返信しています」と表示され、二重投稿されないこと
+17. 未契約の状態で `/reviews` `/settings` に「月額プランが未契約です」の案内が出ること。未返信レビューの返信ボタンが「月額プランのご契約後、返信を投稿できます。」に置き換わること
+18. 契約後に `/reviews` に「AI返信を作成して投稿」ボタンが現れること
 
-### 自動返信の冪等性（スクリプトで検証）
+### 検証スクリプト
 
-`scripts/verify-reply-idempotency.ts` はGBP APIをスタブし、**実際の `syncReviews()` を
-ライブDBに対して実行**して、返信履歴が失われず二重投稿が起きないことを確認します。
-テストデータは実行の前後で削除されます。
-
-```bash
-npx tsx scripts/verify-reply-idempotency.ts
-```
-
-| 検証内容 | 期待結果 |
+| スクリプト | 内容 |
 |---|---|
-| GBPが `reviewReply` を含まない取得の再来 | 保存済みの `reply_text` / `replied_at` が保持される |
-| GBPが `reviewReply` を含む取得 | GBP側の値（Googleで編集した内容）が採用される |
-| 未返信レビューの再取得 | `reply_text` は `null` のまま |
-| `claimed_at` カラム未適用時 | `claimReviews()` が例外を投げずに排他制御なしで続行する |
+| `npx tsx scripts/verify-paywall.ts` | 契約状態ごとのゲーティング（未契約/契約中/猶予/解約済み）とStripeの状態マッピング |
+| `npx tsx scripts/verify-reply-idempotency.ts` | 再取得で返信履歴が失われず、二重投稿が起きないこと |
+| `npx tsx scripts/verify-signup-trigger.ts` | 新規登録時に `profiles` 行が自動作成されること（`handle_new_user` トリガー） |
+| `npx tsx scripts/verify-resilience.ts` | 連携単位のエラー分離・失効トークンの検出・プロンプトインジェクション対策・SEOキーワード検証・ページング・cronの回転 |
+
+いずれもライブDBに対して実行し、テストデータは実行の前後で削除します。
 
 > **注意**: `claimed_at` を使う排他制御（C5）を効かせるには、
 > `20261020120400_add_claim_and_preserve_reply.sql` の適用が必要です。
@@ -582,16 +705,20 @@ src/
 ├── proxy.ts                 # セッション更新とルート保護（Next.js 16のmiddleware後継）
 ├── lib/
 │   ├── ai.ts                 # AI返信文の生成（Gemini / OpenAI互換エンドポイント）
+│   ├── app-url.ts            # アプリケーションのベースURL（APP_URL）
+│   ├── auth.ts               # 認証済みユーザーの取得（React.cache でメモ化）
+│   ├── billing.ts            # 契約状態の判定（課金のゲート）
 │   ├── crypto.ts             # Googleトークンの暗号化（AES-256-GCM）
-│   ├── origin.ts             # リクエスト元のオリジン取得
 │   ├── review-claims.ts      # 自動返信の排他制御（claimed_at の確保・解放）
+│   ├── seo-keywords.ts       # SEOキーワードの往復と検証
 │   ├── stripe.ts             # Stripeクライアント・価格ラベル取得
 │   ├── google/
 │   │   ├── oauth.ts          # OAuth2.0（認証URL・コード交換・トークン更新）
 │   │   ├── business.ts       # Business Profile API（店舗・レビュー取得・返信）
 │   │   ├── connections.ts    # 連携情報の保存とアクセストークン管理
-│   │   ├── reviews.ts        # レビュー取得・DB同期
-│   │   └── auto-reply.ts     # 未返信レビューの自動生成・自動投稿
+│   │   ├── reviews.ts        # レビュー取得・DB同期・返信の記録
+│   │   ├── auto-reply.ts     # 未返信レビューの自動生成・自動投稿
+│   │   └── sync-batch.ts     # 1回の処理量の上限と回転選択
 │   ├── supabase/
 │   │   ├── client.ts         # ブラウザ用クライアント
 │   │   ├── server.ts         # サーバー用クライアント
@@ -601,6 +728,7 @@ src/
 │   ├── ui/                   # shadcn/uiコンポーネント（Base UIベース）
 │   ├── auth/                 # ログイン・新規登録フォーム
 │   ├── billing/plan-card.tsx # 月額プランカード（ステータス・契約/管理ボタン）
+│   ├── billing/subscription-notice.tsx # 未契約時の案内バナー
 │   ├── landing/              # ランディングページ用（ヘッダー・レビュー実例・FAQ）
 │   ├── reviews/              # レビュー履歴リスト・AI返信ボタン
 │   ├── settings/             # 店舗設定フォーム・Google連携カード
@@ -632,12 +760,14 @@ worker.ts                     # Workersカスタムラッパー（cronのschedul
 
 ## 10. 運用メモ
 
-- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得はCloudflareのcron（`wrangler.jsonc` の `triggers.crons`）が1時間ごとに `/api/reviews/sync` を実行します。1店舗につき最新50件まで。
+- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得はCloudflareのcron（`wrangler.jsonc` の `triggers.crons`）が1時間ごとに `/api/reviews/sync` を実行します。1店舗につき最新50件まで。**月額プランの契約中のみ**実行されます。
+- **課金のゲート**: レビュー取得・AI返信の生成・投稿は契約中のみ利用できます。判定は `src/lib/billing.ts` の `isSubscribed()` に集約しています。未契約時は `/reviews` と `/settings` に案内バナーを表示し、cronでは静かにスキップします。
 - **自動返信**: `shop_settings.auto_reply_enabled` が true の店舗だけ、取得したレビューへ自動で返信を投稿します（初期値はOFF）。手動で投稿したものは「AIが作成した返信」、自動のものは「AIが自動で作成した返信」と表示されます。処理対象の行は `claimed_at` で排他的に確保するため、cron と手動操作が同時に走っても同じレビューへ二重投稿されません。
 - **返信の保持**: 一度投稿した返信は、再取得のたびに消えることはありません。GBPの応答に `reviewReply` が含まれない場合も保存済みの返信履歴は保持されます。
 - **AI返信の投稿**: 低評価（1〜3点）は「謝罪・改善案のみ、SEOキーワードは入れない」、高評価（4〜5点）は「感謝 + SEOキーワードを自然に盛り込み」。生成した文はそのままGoogleマップへ投稿されます。
 - **トークン管理**: Googleのアクセストークン・リフレッシュトークンは `GOOGLE_TOKEN_ENCRYPTION_KEY` で暗号化して保存しています。キーが変わると再連携が必要です。**本番と開発では別のキーを使ってください。**
-- **トークンの更新**: `getValidAccessToken()` が暗号化されたアクセストークンを復号し、期限（現在時刻+60秒より前）が切れている場合はリフレッシュトークンで更新・再暗号化します。
+- **トークンの更新**: `getValidAccessToken()` が暗号化されたアクセストークンを復号し、期限（現在時刻+60秒より前）が切れている場合はリフレッシュトークンで更新・再暗号化します。更新が `invalid_grant` で失敗した場合は、その連携を `revoked` として保存し、以後の処理対象から外します。
+- **ベースURL**: 決済リダイレクト・OAuthのredirect_uri・メール確認リンクの遷移先は `APP_URL` の環境変数で固定しています。リクエストのHostヘッダーから求めると改ざんされるためです。
 - **暗号化方式**: AES-256-GCM。形式は `base64(iv).base64(authTag).base64(ciphertext)`。鍵は `GOOGLE_TOKEN_ENCRYPTION_KEY`（64文字のhex = 32バイト）。
 
 ---
@@ -651,7 +781,11 @@ worker.ts                     # Workersカスタムラッパー（cronのschedul
 | レビューの取得件数は最新50件 | 50件を超えると古いレビューは自動取得の対象外 |
 | レビュー一覧のページングなし | 全件を一度に読み込みます |
 | `reviews` と `gbp_connections` に insert/update のRLSポリシーがない | service role 経由の一括書き込みのみ。ユーザー操作で直接書き込めない設計です |
-| 自動返信にレート制限・上限がない | ONにすると取得した未返信レビューが連続して投稿されます |
+| 契約状態の読み取りは `profiles` 行に依存する | `profiles` 行が無いユーザー（トリガー適用前の既存ユーザー）は未契約として扱われます。契約時にStripeのwebhookが行を作るため実害はありません |
+| 自動返信の1回あたり上限は20件 | `AUTO_REPLY_BATCH_SIZE`。残りは次回の実行に回ります。上限自体は変えられます |
+| 未適用マイグレーションの影響 | `claimed_at` は排他制御、`status` は失効連携の保存、`posted_via` は返信の出所表示、`stripe_events` はwebhookの重複遮断が無効になります。いずれも fail-soft で動きますが、`posted_via` は返信が「AIが作成した返信」と表示されません |
+| エラーバウンダリは1ルートのみ | `(app)` 配下と `global-error` / `not-found` は用意していますが、(auth) ページとAPIルートにはありません |
 | ルート直下の `.env` が追跡対象 | `WRANGLER_BUILD_*` を保持するため。秘密情報は `.env.local` / `.dev.vars` / `wrangler secret put` で管理してください |
-| `src/proxy.ts` の保護対象は `/dashboard` のみ | `/settings` と `/reviews` は `(app)` レイアウト側のリダイレクトで保護されています |
+| `APP_URL` は必須 | 未設定だと決済のCheckout作成とOAuthの開始が失敗します（`/dashboard?checkout=error` に遷移）。メール確認リンクはリクエストのoriginにフォールバックします。本番では必ず `wrangler secret put APP_URL` を実行してください |
+| (auth) ページとAPIルートにエラーバウンダリがない | 404は `not-found.tsx` を使うが、`/login` `/signup` の例外は素のエラーページになります |
 | テスト・CIが無い | 変更後は `npm run lint` と `npm run build`、および[検証手順](#8-検証手順)による手動確認が必要です |

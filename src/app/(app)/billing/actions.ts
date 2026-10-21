@@ -1,16 +1,9 @@
 "use server";
 
-import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { getAppUrl } from "@/lib/app-url";
 import { createClient } from "@/lib/supabase/server";
 import { getStripe, isStripeConfigured } from "@/lib/stripe";
-
-async function getOrigin() {
-  const headerStore = await headers();
-  const proto = headerStore.get("x-forwarded-proto") ?? "http";
-  const host = headerStore.get("host") ?? "localhost:3000";
-  return `${proto}://${host}`;
-}
 
 async function requireUser() {
   const supabase = await createClient();
@@ -28,10 +21,12 @@ export async function createCheckoutSession() {
   const stripe = getStripe();
   if (!stripe) redirect("/dashboard?checkout=error");
 
-  const origin = await getOrigin();
   let checkoutUrl: string | null = null;
+  let portalUrl: string | null = null;
 
   try {
+    // APP_URL が未設定でも、ほかの失敗と同じ経路でユーザーに伝わるようにする
+    const origin = getAppUrl();
     const { data: profile } = await supabase
       .from("profiles")
       .select("stripe_customer_id")
@@ -54,20 +49,45 @@ export async function createCheckoutSession() {
       customerId = customer.id;
     }
 
-    const session = await stripe.checkout.sessions.create({
+    // 既に契約中のサブスクリプションがあれば、二重契約を避けて管理画面へ送る。
+    // 顧客IDがまだ profiles に反映されていない状態で二度押すと作成されてしまう。
+    // past_due / trialing も請求上の契約なので含める（active だけだと
+    // 支払いに失敗中のお客様が二重に契約できてしまう）。
+    const existingSubscription = await stripe.subscriptions.list({
       customer: customerId,
-      mode: "subscription",
-      line_items: [{ price: process.env.STRIPE_PRICE_ID!, quantity: 1 }],
-      client_reference_id: user.id,
-      subscription_data: { metadata: { user_id: user.id } },
-      success_url: `${origin}/dashboard?checkout=success`,
-      cancel_url: `${origin}/dashboard?checkout=cancel`,
+      status: ["active", "trialing", "past_due"],
+      limit: 1,
     });
-    checkoutUrl = session.url;
+
+    if (existingSubscription.data.length > 0) {
+      const portal = await stripe.billingPortal.sessions.create({
+        customer: customerId,
+        return_url: `${origin}/dashboard`,
+      });
+      portalUrl = portal.url;
+    } else {
+      const session = await stripe.checkout.sessions.create(
+        {
+          customer: customerId,
+          mode: "subscription",
+          line_items: [{ price: process.env.STRIPE_PRICE_ID!, quantity: 1 }],
+          client_reference_id: user.id,
+          subscription_data: { metadata: { user_id: user.id } },
+          success_url: `${origin}/dashboard?checkout=success`,
+          cancel_url: `${origin}/dashboard?checkout=cancel`,
+        },
+        {
+          // 同一ユーザーの二度押しが同じ Checkout Session を返すようにする
+          idempotencyKey: `checkout:${user.id}:${customerId}`,
+        }
+      );
+      checkoutUrl = session.url;
+    }
   } catch {
     redirect("/dashboard?checkout=error");
   }
 
+  if (portalUrl) redirect(portalUrl);
   if (!checkoutUrl) redirect("/dashboard?checkout=error");
   redirect(checkoutUrl);
 }
@@ -79,10 +99,10 @@ export async function createPortalSession() {
   const stripe = getStripe();
   if (!stripe) redirect("/dashboard?checkout=error");
 
-  const origin = await getOrigin();
   let portalUrl: string | null = null;
 
   try {
+    const origin = getAppUrl();
     const { data: profile } = await supabase
       .from("profiles")
       .select("stripe_customer_id")

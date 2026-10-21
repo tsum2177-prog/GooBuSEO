@@ -17,6 +17,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  MAX_KEYWORD_LENGTH,
+  MAX_KEYWORDS,
+  serializeSeoKeywords,
+} from "@/lib/seo-keywords";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -25,8 +30,6 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-
-const MAX_KEYWORDS = 20;
 
 const categories = [
   "飲食店",
@@ -65,6 +68,7 @@ export function ShopSettingsForm({
   function addKeyword() {
     const value = draft.trim();
     if (!value) return;
+    if (value.length > MAX_KEYWORD_LENGTH) return;
     setKeywords((current) =>
       current.includes(value) || current.length >= MAX_KEYWORDS
         ? current
@@ -163,19 +167,27 @@ export function ShopSettingsForm({
                 }
               }}
               placeholder="例: 新宿"
-              maxLength={30}
+              maxLength={MAX_KEYWORD_LENGTH}
             />
             <Button
               type="button"
               variant="outline"
               onClick={addKeyword}
-              disabled={!draft.trim() || keywords.length >= MAX_KEYWORDS}
+              disabled={
+                !draft.trim() ||
+                draft.trim().length > MAX_KEYWORD_LENGTH ||
+                keywords.length >= MAX_KEYWORDS
+              }
             >
               <Plus />
               追加
             </Button>
           </div>
-          <input type="hidden" name="seo_keywords" value={keywords.join(",")} />
+          <input
+            type="hidden"
+            name="seo_keywords"
+            value={serializeSeoKeywords(keywords)}
+          />
           {keywords.length > 0 ? (
             <ul className="flex flex-wrap gap-2">
               {keywords.map((keyword) => (

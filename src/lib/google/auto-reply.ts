@@ -2,7 +2,9 @@ import { generateReply, isAiConfigured } from "@/lib/ai";
 import { isSubscribed } from "@/lib/billing";
 import { claimReviews, releaseReviewClaim } from "@/lib/review-claims";
 import { replyToReview } from "./business";
-import { getValidAccessToken, listConnections } from "./connections";
+import { getValidAccessToken, listActiveConnections } from "./connections";
+import { recordReply } from "./reviews";
+import { AUTO_REPLY_BATCH_SIZE } from "./sync-batch";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export async function autoReplyPendingReviews(userId: string): Promise<{
@@ -35,24 +37,49 @@ export async function autoReplyPendingReviews(userId: string): Promise<{
     .select("id, location_id, external_id, author_name, rating, content")
     .eq("user_id", userId)
     .is("reply_text", null)
-    .order("published_at", { ascending: true, nullsFirst: false });
+    .order("published_at", { ascending: true, nullsFirst: false })
+    .limit(AUTO_REPLY_BATCH_SIZE);
 
   if (!pending || pending.length === 0) {
     return { replied: 0, skipped: 0 };
   }
 
   // 同時に走った実行と対象が重ならないよう、排他的に確保する
-  const claimedIds = new Set(await claimReviews(userId, pending.map((row) => row.id)));
+  const claimedIds = new Set(
+    await claimReviews(
+      userId,
+      pending.map((row) => row.id)
+    )
+  );
   const targets = pending.filter((row) => claimedIds.has(row.id));
 
-  const connections = await listConnections(userId);
+  // アクセストークンは店舗ごとに1回だけ取得する。
+  // 取得に失敗した店舗は、その/reviewsだけ処理しない。
+  // （レビューごとに_refreshすると、同じ失敗を何度も試してしまう）
+  const connections = await listActiveConnections(userId);
+  const accessTokens = new Map<string, string>();
+  for (const connection of connections) {
+    try {
+      accessTokens.set(
+        connection.location_id,
+        await getValidAccessToken(connection)
+      );
+    } catch (error) {
+      console.error(
+        `auto reply skipped location ${connection.location_id}`,
+        error
+      );
+    }
+  }
+
   let replied = 0;
 
   for (const review of targets) {
-    const connection = connections.find(
-      (item) => item.location_id === review.location_id
-    );
-    if (!connection) continue;
+    const accessToken = accessTokens.get(review.location_id ?? "");
+    if (!accessToken) {
+      await releaseReviewClaim(review.id);
+      continue;
+    }
 
     try {
       const replyText = await generateReply({
@@ -65,17 +92,13 @@ export async function autoReplyPendingReviews(userId: string): Promise<{
         seoKeywords: settings.seo_keywords ?? [],
       });
 
-      const accessToken = await getValidAccessToken(connection);
       await replyToReview(review.external_id, replyText, accessToken);
 
-      await admin
-        .from("reviews")
-        .update({
-          reply_text: replyText,
-          replied_at: new Date().toISOString(),
-          auto_replied: true,
-        })
-        .eq("id", review.id);
+      await recordReply({
+        reviewId: review.id,
+        replyText,
+        autoReplied: true,
+      });
 
       replied += 1;
     } catch (error) {
