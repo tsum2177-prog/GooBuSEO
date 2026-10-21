@@ -48,6 +48,41 @@ export async function listActiveConnections(
   return connections.filter((connection) => connection.status !== "revoked");
 }
 
+/**
+ * 失効していない連携が1件でもあるかどうかを返します。
+ *
+ * 未契約の無料枠では「Googleが連携済みかどうか」だけを判定したいため、
+ * トークンまで取得せずに存在確認だけを行います。
+ */
+export async function hasActiveConnection(userId: string): Promise<boolean> {
+  try {
+    const admin = createAdminClient();
+    const { data, error } = await admin
+      .from("gbp_connections")
+      .select("id, status")
+      .eq("user_id", userId);
+
+    if (error) {
+      // status カラムが未適用の環境では取得できないので、id だけで判定し直す
+      const fallback = await admin
+        .from("gbp_connections")
+        .select("id")
+        .eq("user_id", userId)
+        .limit(1);
+      if (fallback.error) {
+        console.error("failed to check google connections", fallback.error);
+        return false;
+      }
+      return (fallback.data ?? []).length > 0;
+    }
+
+    return (data ?? []).some((row) => (row.status ?? "active") !== "revoked");
+  } catch (error) {
+    console.error("failed to check google connections", error);
+    return false;
+  }
+}
+
 export async function saveConnection(input: {
   userId: string;
   googleAccountId: string;

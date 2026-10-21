@@ -1,4 +1,4 @@
-import { isSubscribed } from "@/lib/billing";
+import { getAccessLevel } from "@/lib/billing";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getValidAccessToken, listConnections } from "./connections";
 import { listReviews, toStarRating } from "./business";
@@ -52,15 +52,17 @@ async function fetchExistingReplies(
 }
 
 export async function syncReviews(userId: string): Promise<SyncResult> {
-  // レビュー取得は月額サブスクリプションの特典。未契約なら何もしない
-  if (!(await isSubscribed(userId))) {
+  // レビュー取得はGoogleマップの連携があればできる。
+  // 契約していない場合は1店舗だけ処理する（クォータとAIコストの保護）。
+  const access = await getAccessLevel(userId);
+  if (!access.canReadReviews) {
     return { imported: 0, locations: 0, failures: [], allRevoked: false };
   }
 
   const connections = await listConnections(userId);
-  const active = connections.filter(
-    (connection) => connection.status !== "revoked"
-  );
+  const active = connections
+    .filter((connection) => connection.status !== "revoked")
+    .slice(0, access.maxLocations);
 
   if (active.length === 0) {
     return {
@@ -165,7 +167,7 @@ export async function syncReviews(userId: string): Promise<SyncResult> {
 
   return {
     imported,
-    locations: connections.length,
+    locations: active.length,
     failures,
     allRevoked: false,
   };

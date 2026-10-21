@@ -2,11 +2,13 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { listAccounts, listLocations } from "@/lib/google/business";
 import { saveConnection } from "@/lib/google/connections";
+import { syncReviews } from "@/lib/google/reviews";
 import {
   exchangeCode,
   getRedirectUri,
   GoogleAuthError,
 } from "@/lib/google/oauth";
+import { fillShopSettingsFromLocations, type LocationSummary } from "@/lib/shop-settings";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET(request: Request) {
@@ -58,6 +60,7 @@ export async function GET(request: Request) {
 
   // 2. 店舗の一覧と保存
   let saved = 0;
+  const savedLocations: LocationSummary[] = [];
   try {
     const accounts = await listAccounts(tokens.access_token);
     for (const account of accounts) {
@@ -73,6 +76,10 @@ export async function GET(request: Request) {
           refreshToken: tokens.refresh_token,
           expiresIn: tokens.expires_in,
         });
+        savedLocations.push({
+          title: location.title ?? null,
+          primaryCategory: location.primaryCategory ?? null,
+        });
         saved += 1;
       }
     }
@@ -85,5 +92,18 @@ export async function GET(request: Request) {
     redirect("/settings?google=error");
   }
 
-  redirect(`/settings?google=${saved > 0 ? "connected" : "no_location"}`);
+  // 3. 店舗名と業種を自動で設定する（店主が設定済みの値は上書きしない）
+  await fillShopSettingsFromLocations(user.id, savedLocations);
+
+  // 4. レビューを自動で取得する。戻った画面で「取得する」ボタンを押さずに済む
+  try {
+    await syncReviews(user.id);
+  } catch (error) {
+    console.error("[oauth] initial review sync failed", {
+      userId: user.id,
+      error,
+    });
+  }
+
+  redirect(`/dashboard?google=${saved > 0 ? "connected" : "no_location"}`);
 }

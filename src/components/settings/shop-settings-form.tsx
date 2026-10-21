@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import Link from "next/link";
 import { Plus, X } from "lucide-react";
 import {
   saveShopSettings,
@@ -30,21 +31,13 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-
-const categories = [
-  "飲食店",
-  "居酒屋・バー",
-  "喫茶店・カフェ",
-  "美容院・理容店",
-  "歯科医院・クリニック",
-  "ホテル・旅館",
-  "その他",
-];
+import { SHOP_CATEGORIES } from "@/lib/shop-categories";
 
 const initialState: SettingsActionState = { status: "success", message: "" };
 
 export function ShopSettingsForm({
   initial,
+  canAutoReply = true,
 }: {
   initial: {
     shopName: string;
@@ -53,6 +46,8 @@ export function ShopSettingsForm({
     seoKeywords: string[];
     autoReplyEnabled: boolean;
   };
+  /** 自動投稿は月額サブスクリプションの特典 */
+  canAutoReply?: boolean;
 }) {
   const [state, formAction, pending] = useActionState(
     saveShopSettings,
@@ -87,7 +82,8 @@ export function ShopSettingsForm({
         <CardHeader>
           <CardTitle>店舗情報</CardTitle>
           <CardDescription>
-            AIが返信文を作るときに使われる店舗名と業種です
+            AIが返信文を作るときに使われる店舗名と業種です。Googleマップから
+            自動で入力されるので、変更したい場合だけ編集してください
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -111,7 +107,7 @@ export function ShopSettingsForm({
                 <SelectValue placeholder="業種を選択してください" />
               </SelectTrigger>
               <SelectContent>
-                {categories.map((item) => (
+                {SHOP_CATEGORIES.map((item) => (
                   <SelectItem key={item} value={item}>
                     {item}
                   </SelectItem>
@@ -127,7 +123,7 @@ export function ShopSettingsForm({
         <CardHeader>
           <CardTitle>店舗の強み</CardTitle>
           <CardDescription>
-            返信文に自然に反映される店舗の特徴です。具体的な特徴を書いてください
+            任意項目です。返信文に自然に反映される店舗の特徴です
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-2">
@@ -150,7 +146,7 @@ export function ShopSettingsForm({
         <CardHeader>
           <CardTitle>SEOキーワード</CardTitle>
           <CardDescription>
-            高評価のレビューへの返信に、自然に盛り込みます
+            任意項目です。高評価のレビューへの返信に、自然に盛り込みます
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -222,28 +218,43 @@ export function ShopSettingsForm({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex items-center justify-between gap-4">
-            <div className="space-y-1">
-              <Label htmlFor="auto_reply_switch">自動返信をONにする</Label>
-              <p className="text-sm text-muted-foreground">
-                ONにすると、取得したレビューに自動で返信を投稿します。
-                OFFの場合でも、レビュー一覧から手動で投稿できます。
+          {canAutoReply ? (
+            <>
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <Label htmlFor="auto_reply_switch">自動返信をONにする</Label>
+                  <p className="text-sm text-muted-foreground">
+                    ONにすると、取得したレビューに自動で返信を投稿します。
+                    OFFの場合でも、レビュー一覧から手動で投稿できます。
+                  </p>
+                </div>
+                <Switch
+                  id="auto_reply_switch"
+                  checked={autoReplyEnabled}
+                  onCheckedChange={(checked) => setAutoReplyEnabled(checked)}
+                />
+              </div>
+              <input
+                type="hidden"
+                name="auto_reply_enabled"
+                value={autoReplyEnabled ? "on" : "off"}
+              />
+              <p className="text-xs text-muted-foreground">
+                自動返信は店舗名義の公開レビューとして投稿され、外からご覧いただけます。
               </p>
+            </>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                自動返信は月額プランのご契約後に使えます。契約すると自動で
+                ONになり、設定を触らずに運用できます。
+              </p>
+              <Button type="button" variant="outline" nativeButton={false} render={<Link href="/dashboard" />}>
+                月額プランを契約する
+              </Button>
+              <input type="hidden" name="auto_reply_enabled" value="off" />
             </div>
-            <Switch
-              id="auto_reply_switch"
-              checked={autoReplyEnabled}
-              onCheckedChange={(checked) => setAutoReplyEnabled(checked)}
-            />
-          </div>
-          <input
-            type="hidden"
-            name="auto_reply_enabled"
-            value={autoReplyEnabled ? "on" : "off"}
-          />
-          <p className="text-xs text-muted-foreground">
-            自動返信は店舗名義の公開レビューとして投稿され、外からご覧いただけます。
-          </p>
+          )}
         </CardContent>
       </Card>
 

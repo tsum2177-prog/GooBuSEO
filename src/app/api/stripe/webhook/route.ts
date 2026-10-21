@@ -141,6 +141,12 @@ export async function POST(request: Request) {
             return NextResponse.json({ received: true, skipped: true });
           }
           if (error) throw error;
+
+          // 契約が成立したら自動返信をONにする。
+          // 設定画面を触らずに、自动投稿まで最短で到達できるようにするため。
+          if (status === "active") {
+            await enableAutoReply(admin, userId);
+          }
         } else if (customerId) {
           const { error, count } = await admin
             .from("profiles")
@@ -165,6 +171,47 @@ export async function POST(request: Request) {
   }
 
   return NextResponse.json({ received: true });
+}
+
+/**
+ * 契約が成立したユーザーの自動返信をONにします。
+ *
+ * 設定画面を開かずに自動投稿まで到達できるようにするためです。
+ * 店舗設定の行が無い場合は、自動返信だけ有効にした行を作ります
+ * （店舗名や業種はGoogle連携時に自動投入されます）。
+ */
+async function enableAutoReply(
+  admin: ReturnType<typeof createAdminClient>,
+  userId: string
+): Promise<void> {
+  const { data, error } = await admin
+    .from("shop_settings")
+    .select("id")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("[stripe] failed to read shop settings", error);
+    return;
+  }
+
+  if (!data) {
+    const { error: insertError } = await admin
+      .from("shop_settings")
+      .upsert({ id: userId, auto_reply_enabled: true }, { onConflict: "id" });
+    if (insertError) {
+      console.error("[stripe] failed to enable auto reply", insertError);
+    }
+    return;
+  }
+
+  const { error: updateError } = await admin
+    .from("shop_settings")
+    .update({ auto_reply_enabled: true })
+    .eq("id", userId);
+  if (updateError) {
+    console.error("[stripe] failed to enable auto reply", updateError);
+  }
 }
 
 /**

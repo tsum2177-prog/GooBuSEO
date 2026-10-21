@@ -2,7 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { isSubscribed, SUBSCRIPTION_REQUIRED_MESSAGE } from "@/lib/billing";
+import {
+  getAccessLevel,
+  GOOGLE_CONNECTION_REQUIRED_MESSAGE,
+} from "@/lib/billing";
 import { deleteConnection } from "@/lib/google/connections";
 import { autoReplyPendingReviews } from "@/lib/google/auto-reply";
 import { syncReviews } from "@/lib/google/reviews";
@@ -70,8 +73,10 @@ export async function syncReviewsAction(): Promise<SettingsActionState> {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  if (!(await isSubscribed(user.id))) {
-    return { status: "error", message: SUBSCRIPTION_REQUIRED_MESSAGE };
+  // レビュー取得はGoogleマップの連携があればできる（契約前でも可）
+  const access = await getAccessLevel(user.id);
+  if (!access.canReadReviews) {
+    return { status: "error", message: GOOGLE_CONNECTION_REQUIRED_MESSAGE };
   }
 
   let imported = 0;

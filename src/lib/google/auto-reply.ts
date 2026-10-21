@@ -1,5 +1,5 @@
 import { generateReply, isAiConfigured } from "@/lib/ai";
-import { isSubscribed } from "@/lib/billing";
+import { getAccessLevel } from "@/lib/billing";
 import { claimReviews, releaseReviewClaim } from "@/lib/review-claims";
 import { replyToReview } from "./business";
 import { getValidAccessToken, listActiveConnections } from "./connections";
@@ -11,8 +11,9 @@ export async function autoReplyPendingReviews(userId: string): Promise<{
   replied: number;
   skipped: number;
 }> {
-  // AI返信の生成と投稿は月額サブスクリプションの。未契約なら何もしない
-  if (!(await isSubscribed(userId))) {
+  // 自動投稿は月額サブスクリプションの特典。未契約なら何もしない
+  const access = await getAccessLevel(userId);
+  if (!access.canAutoReply) {
     return { replied: 0, skipped: 0 };
   }
 

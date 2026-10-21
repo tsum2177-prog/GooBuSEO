@@ -24,6 +24,10 @@ export type GoogleAccount = {
 export type GoogleLocation = {
   name: string;
   title?: string;
+  primaryCategory?: {
+    name?: string;
+    displayName?: string;
+  };
 };
 
 const MAX_PAGE_SIZE = 100;

@@ -1,4 +1,5 @@
 import type Stripe from "stripe";
+import { hasActiveConnection } from "@/lib/google/connections";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export type SubscriptionStatus = "none" | "active" | "past_due" | "canceled";
@@ -12,8 +13,38 @@ export type SubscriptionStatus = "none" | "active" | "past_due" | "canceled";
  */
 const ACCESSIBLE_STATUSES: SubscriptionStatus[] = ["active", "past_due"];
 
+/**
+ * 未契約の無料枠で処理できる店舗数。
+ *
+ * レビュー取得はGBP APIのクォータを消費し、自動返信はAIコストと
+ * 誤投稿リスクに直結するため、契約していない間は1店舗に絞ります。
+ */
+export const FREE_MAX_LOCATIONS = 1;
+
+/**
+ * ユーザーが使える機能の範囲。
+ *
+ * Googleマップの連携があれば、レビュー確認とAI返信の作成（下書き）までは
+ * 無料で使えます。Googleマップへの投稿と自動返信は契約後のみです。
+ */
+export type AccessLevel = {
+  /** レビューの取得・閲覧 */
+  canReadReviews: boolean;
+  /** AI返信の作成（下書き） */
+  canGenerateReplies: boolean;
+  /** Googleマップへの投稿 */
+  canPostReplies: boolean;
+  /** 定期実行による自動投稿 */
+  canAutoReply: boolean;
+  /** 処理できる店舗数の上限 */
+  maxLocations: number;
+};
+
 export const SUBSCRIPTION_REQUIRED_MESSAGE =
-  "月額プランのご契約が必要です。ダッシュボードの「月額プランを契約する」から契約できます。";
+  "投稿と自動返信には月額プランのご契約が必要です。ダッシュボードの「月額プランを契約する」から契約できます。";
+
+export const GOOGLE_CONNECTION_REQUIRED_MESSAGE =
+  "Googleマップがまだ連携されていません。先に連携してください。";
 
 export function parseSubscriptionStatus(
   value: unknown
@@ -90,4 +121,31 @@ export function mapStripeSubscriptionStatus(
  */
 export async function isSubscribed(userId: string): Promise<boolean> {
   return isAccessibleStatus(await getSubscriptionStatus(userId));
+}
+
+/**
+ * ユーザーが使える機能の範囲を判定します。
+ *
+ * 契約済みの場合はすべて使えます。契約していない場合は、Googleマップの
+ * 連携があればレビュー確認とAI返信の作成（下書き）まで使えます。
+ */
+export async function getAccessLevel(userId: string): Promise<AccessLevel> {
+  if (await isSubscribed(userId)) {
+    return {
+      canReadReviews: true,
+      canGenerateReplies: true,
+      canPostReplies: true,
+      canAutoReply: true,
+      maxLocations: Number.POSITIVE_INFINITY,
+    };
+  }
+
+  const connected = await hasActiveConnection(userId);
+  return {
+    canReadReviews: connected,
+    canGenerateReplies: connected,
+    canPostReplies: false,
+    canAutoReply: false,
+    maxLocations: FREE_MAX_LOCATIONS,
+  };
 }

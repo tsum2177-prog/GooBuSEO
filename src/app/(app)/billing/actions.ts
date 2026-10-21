@@ -53,13 +53,21 @@ export async function createCheckoutSession() {
     // 顧客IDがまだ profiles に反映されていない状態で二度押すと作成されてしまう。
     // past_due / trialing も請求上の契約なので含める（active だけだと
     // 支払いに失敗中のお客様が二重に契約できてしまう）。
+    // StripeのSDKは status に単一値しか取らないので、取得後に絞り込みます。
     const existingSubscription = await stripe.subscriptions.list({
       customer: customerId,
-      status: ["active", "trialing", "past_due"],
-      limit: 1,
+      status: "all",
+      limit: 100,
     });
 
-    if (existingSubscription.data.length > 0) {
+    const isBillableStatus = (status: string) =>
+      status === "active" || status === "trialing" || status === "past_due";
+
+    if (
+      existingSubscription.data.some((subscription) =>
+        isBillableStatus(subscription.status)
+      )
+    ) {
       const portal = await stripe.billingPortal.sessions.create({
         customer: customerId,
         return_url: `${origin}/dashboard`,

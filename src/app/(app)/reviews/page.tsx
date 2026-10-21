@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { SubscriptionNotice } from "@/components/billing/subscription-notice";
 import { ReviewList, type ReviewItem } from "@/components/reviews/review-list";
-import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
+import { getAccessLevel } from "@/lib/billing";
 import { getUser } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 
@@ -18,7 +18,7 @@ export default async function ReviewsPage() {
 
   const supabase = await createClient();
 
-  const [{ data, error }, { data: profile }] = await Promise.all([
+  const [{ data, error }, access] = await Promise.all([
     supabase
       .from("reviews")
       .select(
@@ -27,17 +27,10 @@ export default async function ReviewsPage() {
       .eq("user_id", user.id)
       .order("published_at", { ascending: false, nullsFirst: false })
       .limit(50),
-    supabase
-      .from("profiles")
-      .select("subscription_status")
-      .eq("id", user.id)
-      .maybeSingle(),
+    getAccessLevel(user.id),
   ]);
 
   const reviews = (data ?? []) as ReviewItem[];
-  const canReply = isAccessibleStatus(
-    parseSubscriptionStatus(profile?.subscription_status)
-  );
 
   return (
     <div className="space-y-6">
@@ -47,7 +40,7 @@ export default async function ReviewsPage() {
           Googleマップから取得したレビューと、送信済みの返信です。
         </p>
       </div>
-      {!canReply && <SubscriptionNotice />}
+      {!access.canPostReplies && <SubscriptionNotice />}
       {error ? (
         <p
           role="alert"
@@ -56,7 +49,11 @@ export default async function ReviewsPage() {
           レビューを取得できませんでした。データベースの設定を確認してください。
         </p>
       ) : (
-        <ReviewList reviews={reviews} canReply={canReply} />
+        <ReviewList
+          reviews={reviews}
+          canGenerate={access.canGenerateReplies}
+          canPost={access.canPostReplies}
+        />
       )}
     </div>
   );

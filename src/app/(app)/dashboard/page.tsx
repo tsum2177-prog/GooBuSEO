@@ -12,8 +12,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
+import { parseSubscriptionStatus } from "@/lib/billing";
 import { getUser } from "@/lib/auth";
+import { listConnections } from "@/lib/google/connections";
 import { createClient } from "@/lib/supabase/server";
 
 export const metadata: Metadata = {
@@ -41,18 +42,30 @@ const checkoutMessages: Record<
   },
 };
 
+const googleMessages: Record<string, { text: string; className: string }> = {
+  connected: {
+    text: "Googleマップと連携しました。レビューを取得しました。",
+    className:
+      "border-green-200 bg-green-50 text-green-900 dark:border-green-900 dark:bg-green-950 dark:text-green-100",
+  },
+  no_location: {
+    text: "管理できる店舗が見つかりませんでした。Googleマップの管理権限があるか確認してください。",
+    className: "border-border bg-muted text-foreground",
+  },
+};
+
 export default async function DashboardPage({
   searchParams,
 }: {
-  searchParams: Promise<{ checkout?: string }>;
+  searchParams: Promise<{ checkout?: string; google?: string }>;
 }) {
-  const { checkout } = await searchParams;
+  const { checkout, google } = await searchParams;
   const user = await getUser();
   if (!user) redirect("/login");
 
   const supabase = await createClient();
 
-  const [{ data: profile }, { data: settings }, { data: recentReviews }] =
+  const [{ data: profile }, { data: settings }, { data: recentReviews }, connections] =
     await Promise.all([
       supabase
         .from("profiles")
@@ -72,13 +85,17 @@ export default async function DashboardPage({
         .eq("user_id", user.id)
         .order("published_at", { ascending: false, nullsFirst: false })
         .limit(3),
+      listConnections(user.id).catch(() => []),
     ]);
 
   const status = parseSubscriptionStatus(profile?.subscription_status);
-  const message = checkout ? checkoutMessages[checkout] : undefined;
+  const checkoutMessage = checkout ? checkoutMessages[checkout] : undefined;
+  const googleMessage = google ? googleMessages[google] : undefined;
+  const message = checkoutMessage ?? googleMessage;
   const keywords: string[] = settings?.seo_keywords ?? [];
   const autoReplyEnabled = Boolean(settings?.auto_reply_enabled);
   const isConfigured = Boolean(settings?.shop_name || settings?.strengths || keywords.length);
+  const hasConnection = connections.length > 0;
 
   return (
     <div className="space-y-6">
@@ -97,6 +114,29 @@ export default async function DashboardPage({
         </div>
       )}
       <PlanCard status={status} />
+
+      {!hasConnection && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Googleマップと連携する</CardTitle>
+            <CardDescription>
+              連携すると、レビューを自動で取得してAIで返信文を作成します
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Googleのアカウントを選ぶだけで、店は自動で登録されます。
+            </p>
+            <Button
+              className="bg-brand text-brand-foreground hover:bg-brand/90"
+              nativeButton={false}
+              render={<a href="/api/google/oauth/start" />}
+            >
+              Googleマップと連携する
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -195,9 +235,9 @@ export default async function DashboardPage({
             </ul>
           ) : (
             <p className="text-sm text-muted-foreground">
-              {isAccessibleStatus(status)
-                ? "まだレビューがありません。Googleマップ連携が完了すると自動で取得します。"
-                : "まだレビューがありません。月額プランのご契約とGoogleマップ連携が完了すると、自動で取得します。"}
+              {hasConnection
+                ? "まだレビューがありません。次の取得で反映されます。"
+                : "まだレビューがありません。Googleマップと連携すると自動で取得します。"}
             </p>
           )}
         </CardContent>

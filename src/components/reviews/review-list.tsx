@@ -67,10 +67,14 @@ function formatDate(value: string | null): string {
 
 export function ReviewList({
   reviews,
-  canReply = true,
+  canGenerate = true,
+  canPost = true,
 }: {
   reviews: ReviewItem[];
-  canReply?: boolean;
+  /** AI返信の作成（下書き）ができるか */
+  canGenerate?: boolean;
+  /** Googleマップへ投稿できるか */
+  canPost?: boolean;
 }) {
   if (reviews.length === 0) {
     return (
@@ -123,11 +127,11 @@ export function ReviewList({
                   </div>
                 )}
                 {!replied &&
-                  (canReply ? (
-                    <ReplyButton reviewId={review.id} />
+                  (canGenerate ? (
+                    <ReplyButton reviewId={review.id} mode={canPost ? "post" : "draft"} />
                   ) : (
                     <p className="text-sm text-muted-foreground">
-                      月額プランのご契約後、返信を投稿できます。
+                      Googleマップと連携すると、AI返信を作成できます。
                     </p>
                   ))}
               </CardContent>

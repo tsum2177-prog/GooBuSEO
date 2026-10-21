@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { SubscriptionNotice } from "@/components/billing/subscription-notice";
 import { GoogleConnectionCard } from "@/components/settings/google-connection-card";
 import { ShopSettingsForm } from "@/components/settings/shop-settings-form";
-import { isAccessibleStatus, parseSubscriptionStatus } from "@/lib/billing";
+import { getAccessLevel } from "@/lib/billing";
 import { getUser } from "@/lib/auth";
 import { listConnections } from "@/lib/google/connections";
 import { isGoogleConfigured } from "@/lib/google/oauth";
@@ -50,34 +50,25 @@ export default async function SettingsPage({
 
   const supabase = await createClient();
 
-  const [{ data: settings }, connections, { data: profile }] =
-    await Promise.all([
-      supabase
-        .from("shop_settings")
-        .select(
-          "shop_name, category, strengths, seo_keywords, auto_reply_enabled"
-        )
-        .eq("id", user.id)
-        .maybeSingle(),
-      listConnections(user.id).catch(() => []),
-      supabase
-        .from("profiles")
-        .select("subscription_status")
-        .eq("id", user.id)
-        .maybeSingle(),
-    ]);
+  const { data: settings } = await supabase
+    .from("shop_settings")
+    .select(
+      "shop_name, category, strengths, seo_keywords, auto_reply_enabled"
+    )
+    .eq("id", user.id)
+    .maybeSingle();
 
+  const access = await getAccessLevel(user.id);
+  const connections = await listConnections(user.id).catch(() => []);
   const message = google ? googleMessages[google] : undefined;
-  const canSync = isAccessibleStatus(
-    parseSubscriptionStatus(profile?.subscription_status)
-  );
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">店舗設定</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          店舗の情報を登録しておくと、AIの返信文にその情報を反映できます。
+          店舗名と業種はGoogleマップから自動で入ります。AIの返信文をより店舗
+          に合わせるために、任意の項目を追加してください。
         </p>
       </div>
       {message && (
@@ -88,7 +79,7 @@ export default async function SettingsPage({
           {message.text}
         </div>
       )}
-      {!canSync && <SubscriptionNotice />}
+      {!access.canPostReplies && <SubscriptionNotice />}
       <GoogleConnectionCard
         locations={connections.map((connection) => ({
           id: connection.id,
@@ -107,6 +98,7 @@ export default async function SettingsPage({
           seoKeywords: settings?.seo_keywords ?? [],
           autoReplyEnabled: settings?.auto_reply_enabled ?? false,
         }}
+        canAutoReply={access.canAutoReply}
       />
     </div>
   );

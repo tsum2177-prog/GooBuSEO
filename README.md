@@ -37,10 +37,12 @@ Googleマップへ投稿する。店舗はGoogleマップと接続するだけ�
 | 機能 | 実装場所 |
 |---|---|
 | メール+パスワードの認証（Supabase Auth） | `src/app/(auth)/` |
+| Googleアカウントでのサインイン（Supabase AuthのGoogle provider） | `src/components/auth/google-signin-button.tsx` |
 | 月額サブスク（Stripe Checkout + Webhook） | `src/app/(app)/billing/actions.ts`, `src/app/api/stripe/webhook/route.ts` |
 | ダッシュボード（プラン・店舗設定・最新レビュー） | `src/app/(app)/dashboard/page.tsx` |
 | 店舗設定（店舗名・業種・強み・SEOキーワード・自動返信ON/OFF） | `src/app/(app)/settings/` |
 | 月額サブスクによる機能の制限（契約状態によるゲーティング） | `src/lib/billing.ts` |
+| 店舗名・業種の自動投入（Googleマップから取得） | `src/lib/shop-settings.ts`, `src/lib/shop-categories.ts` |
 | Google Business Profile OAuth連携（複数店舗を自動登録） | `src/app/api/google/oauth/`, `src/lib/google/oauth.ts` |
 | レビュー取得（1時間ごとのcron + 手動実行） | `src/app/api/reviews/sync/route.ts`, `src/lib/google/reviews.ts` |
 | AI返信生成（Gemini / `gemini-3.5-flash-lite`） | `src/lib/ai.ts` |
@@ -131,30 +133,33 @@ Cloudflare Cron（1時間ごと）
 
 ### 課金のゲート（誰が有料機能を使えるか）
 
-レビュー取得・AI返信の生成・返信の投稿は、**月額サブスクリプションの契約中のみ**
-利用できます。判定は `src/lib/billing.ts` に集約しています。
+Googleマップの**連携**があれば、レビュー取得・閲覧とAI返信の**下書き作成**までは
+無料で使えます。Googleマップへの**投稿**と**自動返信**は、**月額サブスクリプションの契約中のみ**
+利用できます。判定は `src/lib/billing.ts` の `getAccessLevel()` に集約しています。
 
-| 契約状態 | 利用 | 備考 |
-|---|---|---|
-| `active` | 可 | 正常な契約中 |
-| `past_due` | 可 | Stripeが支払いを再回収中の猶予。Stripeが`canceled`にするまでは許可 |
-| `none` | 不可 | 未契約 |
-| `canceled` | 不可 | 解約済み |
+| 契約状態 | レビュー取得・下書き | 投稿・自動返信 | 備考 |
+|---|---|---|---|
+| `active` | 可 | 可 | 正常な契約中 |
+| `past_due` | 可 | 可 | Stripeが支払いを再回収中の猶予。Stripeが`canceled`にするまでは許可 |
+| `none` | Google連携があれば可（1店舗まで） | 不可 | 未契約 |
+| `canceled` | Google連携があれば可（1店舗まで） | 不可 | 解約済み |
 
 ```ts
 // src/lib/billing.ts
+export async function getAccessLevel(userId: string): Promise<AccessLevel>
 export async function isSubscribed(userId: string): Promise<boolean>
 export function isAccessibleStatus(status: SubscriptionStatus): boolean
 ```
 
 ゲートしている箇所:
 
-| 箇所 | 対象 |
-|---|---|
-| `src/lib/google/reviews.ts` `syncReviews()` | レビュー取得 |
-| `src/lib/google/auto-reply.ts` `autoReplyPendingReviews()` | AI返信の自動生成・投稿 |
-| `src/app/(app)/reviews/actions.ts` `generateAndPostReply()` | 手動での返信生成・投稿 |
-| `src/app/(app)/settings/actions.ts` `syncReviewsAction()` | 「レビューを取得する」ボタン |
+| 箇所 | 対象 | ゲート |
+|---|---|---|
+| `src/lib/google/reviews.ts` `syncReviews()` | レビュー取得 | `canReadReviews` / `maxLocations` |
+| `src/lib/google/auto-reply.ts` `autoReplyPendingReviews()` | AI返信の自動生成・投稿 | `canAutoReply` |
+| `src/app/(app)/reviews/actions.ts` `generateAndPostReply()` | 手動での返信投稿 | `canPostReplies` |
+| `src/app/(app)/reviews/actions.ts` `generateReplyDraft()` | 下書き生成 | `canGenerateReplies` |
+| `src/app/(app)/settings/actions.ts` `syncReviewsAction()` | 「レビューを取得する」ボタン | `canReadReviews` |
 
 未契約時はライブラリ層では静かに何もしない（cronのログを汚さないため）、
 Server Actionでは利用者に分かるメッセージを返します。
@@ -509,6 +514,23 @@ Confirm email を ON で使う場合、Authentication → Email Templates → Co
 （デフォルトの `{{ .ConfirmationURL }}` のままでも `/auth/confirm?code=` 経由で動作します）
 
 > Supabaseは `example.com` などの予約ドメインを新規登録に拒否します。テスト時は実在するドメインのメールアドレスを使ってください。
+
+### 6.2.1 Supabase（Googleでサインイン）
+
+ログイン画面の **「Googleで始める」** を使う場合は、Supabase 側で Google provider を有効にします。
+
+1. Authentication → Sign In / Providers → **Google** を有効化
+2. Google Cloud Console で **別のOAuthクライアント** を作成します
+   - 承認済みリダイレクトURI: `https://<project-ref>.supabase.co/auth/v1/callback`
+   - GBP連携用（`GOOGLE_CLIENT_ID`）とは**別**のクライアントにしてください。GBP用は同意画面が `business.manage` スコープで設定されており、Supabase用のcallbackを扱えません
+3. 作成したクライアントID/Secretを Authentication → Providers → Google に設定
+4. Authentication → URL Configuration → **Redirect URLs** に次を追加
+   - `http://localhost:3000/auth/confirm`（開発）
+   - `https://<your-domain>/auth/confirm`（本番）
+
+> Googleの同意画面が「テスト」モードの場合、Supabase経由のGoogleサインインも
+> テストユーザー限定になります。一般公開にはGoogleへの公開申請が必要です
+> （GBPのアクセス承認とは別の申請です）。
 
 ### 6.3 データベース
 

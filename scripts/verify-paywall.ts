@@ -5,12 +5,15 @@
  * - 契約中（active）と支払い遅延（past_due）は利用可能であること
  * - 解約済み（canceled）と未契約（none）は利用不可であること
  * - Stripeのサブスクリプション状態のマッピングが正しいこと
+ * - getAccessLevel が契約状態とGoogle連携の有無から権限を正しく判定すること
  *
  * 実行: npx tsx scripts/verify-paywall.ts
  */
 import fs from "node:fs";
 import { createAdminClient } from "../src/lib/supabase/admin";
 import {
+  FREE_MAX_LOCATIONS,
+  getAccessLevel,
   getSubscriptionStatus,
   isAccessibleStatus,
   isSubscribed,
@@ -19,6 +22,7 @@ import {
 } from "../src/lib/billing";
 import { syncReviews } from "../src/lib/google/reviews";
 import { autoReplyPendingReviews } from "../src/lib/google/auto-reply";
+import { hasActiveConnection } from "../src/lib/google/connections";
 
 for (const line of fs.readFileSync(".env.local", "utf8").split(/\r?\n/)) {
   if (!line || line.startsWith("#") || !line.includes("=")) continue;
@@ -114,7 +118,9 @@ async function main() {
       mapStripeSubscriptionStatus("incomplete_expired") === "canceled"
     );
 
-    // --- 3. 未契約なら機能が止まる ---------------------------------------
+    // --- 3. 未契約なら投稿・自動返信が止まる -----------------------------
+    const connected = await hasActiveConnection(USER_ID);
+
     await setStatus("none");
     check(
       "未契約: isSubscribed が false",
@@ -127,9 +133,11 @@ async function main() {
 
     const synced = await syncReviews(USER_ID);
     check(
-      "未契約: syncReviews が何も取得しない",
-      synced.imported === 0 && synced.locations === 0,
-      `imported=${synced.imported} locations=${synced.locations}`
+      "未契約: 取得はGoogle連携があるときだけ（最大1店舗）",
+      connected
+        ? synced.locations <= FREE_MAX_LOCATIONS
+        : synced.imported === 0 && synced.locations === 0,
+      `imported=${synced.imported} locations=${synced.locations} connected=${connected}`
     );
 
     const auto = await autoReplyPendingReviews(USER_ID);
@@ -162,7 +170,43 @@ async function main() {
       (await isSubscribed(USER_ID)) === false
     );
 
-    // --- 5. 存在しないユーザー -------------------------------------------
+    // --- 5. 権限モデル（getAccessLevel） --------------------------------
+    await setStatus("none");
+    const freeAccess = await getAccessLevel(USER_ID);
+    check(
+      "未契約: Googleマップへの投稿は不可",
+      freeAccess.canPostReplies === false
+    );
+    check(
+      "未契約: 自動返信は不可",
+      freeAccess.canAutoReply === false
+    );
+    check(
+      `未契約: 店舗数は${FREE_MAX_LOCATIONS}件に制限される`,
+      freeAccess.maxLocations === FREE_MAX_LOCATIONS
+    );
+    check(
+      "未契約: レビュー取得・下書き生成はGoogle連携の有無で決まる",
+      freeAccess.canReadReviews === connected &&
+        freeAccess.canGenerateReplies === connected,
+      `connected=${connected}`
+    );
+
+    await setStatus("active");
+    const paidAccess = await getAccessLevel(USER_ID);
+    check(
+      "契約中: すべての機能が使える",
+      paidAccess.canReadReviews === true &&
+        paidAccess.canGenerateReplies === true &&
+        paidAccess.canPostReplies === true &&
+        paidAccess.canAutoReply === true
+    );
+    check(
+      "契約中: 店舗数の上限なし",
+      paidAccess.maxLocations === Number.POSITIVE_INFINITY
+    );
+
+    // --- 6. 存在しないユーザー -------------------------------------------
     check(
       "未知のユーザー: 未契約として扱う（fail-closed）",
       (await isSubscribed("00000000-0000-0000-0000-000000000000")) === false

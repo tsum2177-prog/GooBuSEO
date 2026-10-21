@@ -18,10 +18,19 @@ export function getRedirectUri(): string {
   );
 }
 
+/**
+ * Googleの認可URLを組み立てます。
+ *
+ * `forceConsent` を false にすると同意画面を出さずにアカウント選択だけ
+ * にできます。refresh token を既に持っている再連携では、同意画面を
+ * 出さないほうが利用の手間が減ります。
+ */
 export function buildAuthUrl({
   state,
+  forceConsent = true,
 }: {
   state: string;
+  forceConsent?: boolean;
 }): string {
   const params = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID ?? "",
@@ -29,10 +38,14 @@ export function buildAuthUrl({
     response_type: "code",
     scope: GOOGLE_SCOPE,
     access_type: "offline",
-    prompt: "consent",
     include_granted_scopes: "true",
     state,
   });
+
+  if (forceConsent) {
+    params.set("prompt", "consent");
+  }
+
   return `${AUTH_ENDPOINT}?${params.toString()}`;
 }
 
