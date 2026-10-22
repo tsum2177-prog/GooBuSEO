@@ -1,6 +1,6 @@
 # 残タスク一覧（レビュー返信AI）
 
-最終更新: 2026-10-21 / フェーズ1〜5の実装完了時点・ドキュメント作成時点
+最終更新: 2026-10-21 / 精査で挙げた9件の対応完了時点（コミット `f27dd79`）
 
 ## 現在地
 
@@ -11,6 +11,8 @@
 | 3 | 店舗設定（強み・SEOキーワード）／レビュー履歴UI | ✅ 完了・動作確認済 |
 | 4 | Google Business Profile OAuth連携・レビュー取得 | ✅ 実装済（未検証） |
 | 5 | Geminiによる返信生成・Google APIへの投稿 | ✅ 実装済（未検証） |
+| 6 | Google連携だけで使えるオンボーディング | ✅ 実装済（未契約は1店舗まで。下書き作成まで無料） |
+| 7 | 公開投稿と本番運用の安全性（精査9件） | ✅ 実装済（`f27dd79`） |
 
 実装済みだが**外部サービスの設定が必要で未検証**のものが残っています。
 
@@ -24,7 +26,7 @@
 | 自動/手動の返信履歴の区別（`reviews.auto_replied`） | ✅ 実装済 |
 | `vercel.json` のcron設定（1時間ごと） | ✅ Cloudflare cron（`wrangler.jsonc` の `triggers.crons`）へ移行済 |
 | **新マイグレーションの適用**（`category` / `auto_reply_enabled` / `auto_replied` 列） | ✅ 適用済（2026-10-20 確認） |
-| **新マイグレーションの適用**（`claimed_at` 列 / 返信履歴保持トリガー、`claimed_by` / `auto_reply_attempts` / `stripe_events.processed_at` 列） | ⬜ 要対応（`20261020120400_add_claim_and_preserve_reply.sql` / `20261021100000_add_stripe_event_processing.sql` / `20261021110000_add_auto_reply_attempts.sql` / `20261021120000_add_claimed_by.sql`） |
+| **新マイグレーションの適用**（`claimed_at` / `claimed_by` / `auto_reply_attempts` / `posted_via` / `status` / `stripe_events`） | ⬜ **要対応（9本すべて未適用。2026-10-21 に実DBで未適用を確認）** — [§11 マイグレーション適用](#11-マイグレーション適用9本) |
 
 ---
 
@@ -32,12 +34,13 @@
 
 | 成果物 | パス | 状態 |
 |---|---|---|
-| 開発者向けREADME（アーキテクチャ・データモデル・API・検証手順） | `README.md` | ✅ 2026-10-20 作成 |
-| 店舗利用者向け操作マニュアル | `docs/manual.md` | ✅ 2026-10-20 作成 |
-| 公開ランディングページ | `src/app/page.tsx` | ✅ 2026-10-20 作成 |
+| 開発者向けREADME（アーキテクチャ・データモデル・API・検証手順） | `README.md` | ✅ 2026-10-20 作成（2026-10-21 更新） |
+| 店舗利用者向け操作マニュアル | `docs/manual.md` | ✅ 2026-10-20 作成（2026-10-21 更新） |
+| 公開ランディングページ | `src/app/page.tsx` | ✅ 2026-10-20 作成（2026-10-21 更新） |
 
 - [x] ランディングページの表示をブラウザで確認（PC 1264px / モバイル 390px / ダークモード）
 - [x] `docs/manual.md` のボタン名・エラーメッセージを実コードと突き合わせ
+- [x] 精査で挙げた9件の反映（README 12章「セキュリティと CI」を新設）
 
 ---
 
@@ -113,7 +116,9 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
       `GEMINI_API_KEY` / `CRON_SECRET`
 - [ ] `NEXT_PUBLIC_*` はビルド時にインライン化されるため、**ビルド時点の `.env.local`** に正しい値が入っていることを確認
 - [ ] `npm run deploy` でデプロイ
+      ※ `deploy` / `preview` / `upload` は `build:cf` を通る。直接 `opennextjs-cloudflare build` を実行しない（実シークレットがWorkerバンドルへ平文で焼き込まれるため）
 - [ ] `supabase/setup-all.sql` を本番用Supabaseプロジェクトで実行
+      ※ `setup-all.sql` は手で編集せず `npm run setup:sql` で再生成する（`npm run setup:sql:check` で差分検出できる）
 - [ ] `GOOGLE_TOKEN_ENCRYPTION_KEY` は本番・開発で**別の値**を生成する（開発時のままだとトークン復号に失敗する）
 - [ ] Stripe Webhook のエンドポイントを本番ドメイン（`https://<domain>/api/stripe/webhook`）に変更
 - [ ] 独自ドメインを設定（Workers → Settings → Domains）
@@ -134,11 +139,19 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 - [ ] 残留した `shop_settings` 行を削除（アカウント削除で自動削除される）
 - [ ] 本番前に `reviews` / `gbp_connections` が空であることを確認
 
+> **2026-10-21 メモ**: 旧 `verify-reply-idempotency` のバグで `profiles` 行が削除されていたため、
+> `subscription_status='none'` として**復旧済み**（未契約扱いで自動返信と投稿は止まる状態）。
+> アカウントごと削除すれば、この行も一緒に消えます。
+
 ---
 
 ## 7. セキュリティ・運用
 
-- [ ] `SUPABASE_SERVICE_ROLE_KEY` はサーバー専用。クライアントへ渡っていないことを再確認
+- [x] `SUPABASE_SERVICE_ROLE_KEY` はサーバー専用。`src/lib/supabase/admin.ts` と `src/lib/crypto.ts` に `import "server-only"` を追加し、クライアントからの取り込みをビルド時に拒否する
+- [x] `gbp_connections` のトークン列を列単位権限に（`20261020120600`）＋ `anon` ロールの select も revoke（`20261021130000`）
+- [x] 本番Workerバンドルへの実シークレット焼き込みを `npm run build:cf` で防止（退避・検査・復元）
+- [x] セキュリティヘッダーの付与（`X-Content-Type-Options` / `X-Frame-Options` / `Referrer-Policy` / `Strict-Transport-Security` / `Permissions-Policy`）。CSPは意図的に未設定
+- [x] CI で lint / typecheck / build を自動実行（`.github/workflows/ci.yml`、Node 22）
 - [ ] `GOOGLE_TOKEN_ENCRYPTION_KEY` をパスワードマネージャなどで管理（失うと再連携が必要）
 - [ ] エラー監視（Cloudflare Logs / Sentry等）の導入
 - [ ] 店舗ごとの「AI返信が自動投稿される」ことを店舗자에게事前周知（公開レビューになる点）
@@ -158,9 +171,6 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 ## 9. コードレビュー所見（2026-10-20）
 
 全ソース（49 TS/TSX + マイグレーションSQL + Worker設定）を精査した結果。
-優先度の高い順に並べる。**修正コードはまだ書いていない。**
-
-### 優先順位の目安（未対応の全項目）
 
 > **2026-10-21 追記**: 下の段階 P0〜P5 の全項目は対応済みです。残っているのは**手作業**と、
 > [2026-10-21 の追加コードレビュー](#11-追加コードレビュー所見2026-10-21)で新たに挙がった項目のみです。
@@ -178,8 +188,10 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 | 段階 | 内容 |
 |---|---|
-| **即** | Supabase SQL Editor でマイグレーションを適用（`20261020120400` / `20261020120500` に加え、`20261020120600` / `20261020120700` / `20261020120800` / `20261021100000` / `20261021110000` / `20261021120000` / `20261021130000` も未適用） |
+| **即** | Supabase SQL Editor でマイグレーション9本を適用（[§12](#12-マイグレーション適用9本) に一覧と影響あり）。**コードのデプロイより先に適用する** |
 | **即** | 本番に `APP_URL` を登録（`npx wrangler secret put APP_URL`）。未設定だと決済とメール確認が動かない |
+| **即** | 価格を決める（月額1プラン、**¥2,980 税込を推奨**）と `STRIPE_PRICE_ID` を設定する（[§13](#13-今回決まった残タスク実装は済設定と運用)） |
+| **即** | Supabase の Google provider を有効化する（別OAuthクライアントと `/auth/confirm` のRedirect URL追加） |
 | **外部** | Stripe のキー設定、Google Cloud の Business Profile API とOAuth同意画面、Geminiキー、本番 `CRON_SECRET` |
 | **外部** | Cloudflare Workers Paid への加入と `supabase/setup-all.sql` の本番適用 |
 | **外部** | Googleのアクセス承認（審査）が実店舗提供の前提 |
@@ -249,7 +261,7 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 ## 10. 追加コードレビュー所見（2026-10-21）
 
 前回の対応（C1〜C5 / M1〜M3 / M6〜M8 / L2〜L3 / L10〜L11）の後の状態で再レビューした結果。
-**修正コードはまだ書いていない。**
+**全項目対応済み（2026-10-21 コミット `2270956` / `f27dd79`）。**
 
 ### High
 
@@ -282,14 +294,109 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 ---
 
+## 11. 精査で挙げた9件（2026-10-21 後半）— 対応完了
+
+全ソースを再度精査し、公開投稿の不可逆性と本番運用に絞って9件を挙げました。**全件実装済み**（コミット `f27dd79`、48ファイル / +4201行）。
+
+| # | 深刻度 | 問題 | 対応 | 主な変更 |
+|---|---|---|---|---|
+| 1 | 高 | Stripe webhook がイベントを**処理前**に記録していたため、処理失敗（500）後のStripe再送が「重複」と判定されて**恒久的に取りこぼされた** | 処理成功後に `processed_at` を記録する方式へ変更。失敗時は記録せず500を返すため再送で必ず再処理される | `src/app/api/stripe/webhook/route.ts` / 新規 `20261021100000` |
+| 2 | 高 | 自動投稿がGoogleマップ上の既存返信を確認せずPUTしていたため、店主の手動返信が**上書き**された（公開レビューは差し替え不可） | 投稿直前に `getReviewReply()` で確認。**確認できない場合は安全側に倒して投稿を見送り**。既存の返信はローカルへ同期して対象から外す | `src/lib/google/auto-reply.ts` |
+| 3 | 高 | `listReviews` が1ページ目しか取らず、`orderBy=updateTime desc` のため**50件を超える古いレビューが恒久的に取得されなかった** | `nextPageToken` を回して全ページ取得（1店舗200件上限、同一トークンでのループ防止） | `src/lib/google/business.ts` |
+| 4 | 高 | `opennextjs-cloudflare build` が `.env.local` の内容を**平文でWorkerバンドルに焼き込んでいた**（service_role・トークン暗号鍵・CRON_SECRET） | 退避 → ビルド → `.open-next` 全体1,666ファイルを走査して検査 → 復元 のスクリプトを追加。検出時は非ゼロ終了。CIも新設 | `scripts/build-cloudflare.ts` / `.github/workflows/ci.yml` / `worker.ts` |
+| 5 | 高 | claim失敗が**全エラーでfail-open**（全件「確保成功」を返し排他が失効）＋所有者が無く10分で窃取可能 | 一時エラーは例外で中止。`claimed_by` で所有者を記録、回収しきい値を30分へ。`claimed_by` 未適用時は `claimed_at` のみで縮退 | `src/lib/review-claims.ts` / 新規 `20261021120000` |
+| 6 | 高 | 検証スクリプトが**本番の `profiles` 行を削除**していた（`verify-reply-idempotency` / `verify-resilience`） | 全列のスナップショット・復元、`ALLOW_LIVE_DB=1` の同意ガード、**常時失敗していたR8アサーション**の修正 | `scripts/lib/live-guard.ts` / `scripts/verify-*.ts` |
+| 7 | 中 | Google API のI/O層に**リトライ・タイムアウト・429処理が皆無**。401でも失効扱いにならず毎時叩き続け | 15秒タイムアウト、指数バックオフ（最大3回、429/5xxのみ）、`Retry-After`対応、`GoogleApiError` による構造化エラー。401は接続を失効扱いにする | `src/lib/google/business.ts` / `src/lib/google/api-error.ts` / `src/lib/google/connections.ts` |
+| 8 | 中 | service_role経路で**テナント境界（`user_id`）が4箇所欠落**。`anon` ロールに `gbp_connections` の select 権限が残存 | 4経路すべてに `user_id` フィルタを必須化。`anon` の select を revoke。`server-only` でクライアント取り込みを禁止 | `src/lib/google/reviews.ts` / `review-claims.ts` / `connections.ts` / 新規 `20261021130000` |
+| 9 | 中 | AIの返信文が**URL・電話番号・レビュー依頼表現**を残したまま公開投稿されうる | スキームなしURL・電話番号・依頼表現を除去。日本語（かな）を1文字も含まない文・30文字未満・文全体が依頼表現の場合は**投稿せずエラー** | `src/lib/ai.ts` |
+
+### 併せて対応した付随バグ
+
+- [x] **JSXの改行による意図しない半角スペース8件**（例: 「店舗 **に** 合わせる」）— 実際の表示崩れ
+- [x] 英語のまま残っていたログメッセージ35件の日本語化
+- [x] 用語の統一（「連携」/「接続」、「送信済み」/「投稿済み」）
+- [x] `setup-all.sql` の手書き同期による乖離を、再生成スクリプト（`npm run setup:sql`）で解消
+- [x] 文字化け（U+FFFD）0件をバイト列で検証
+- [x] `profiles` 行が旧スクリプトで削除されていた件的**復旧**（`phase3-e2e@example.jp` のテストアカウント）
+
+---
+
+## 12. マイグレーション適用（9本）
+
+**2026-10-21 に実DB（Supabase）で確認したところ、以下の9本すべてが未適用**です。未適用のままだと以下の機能が縮退動作になります。
+
+| 未適用のマイグレーション | 未適用だと何が起きるか |
+|---|---|
+| `20261020120400_add_claim_and_preserve_reply.sql` | `claimed_at` が無く、排他制御が働かない（**二重投稿のリスク**） |
+| `20261020120500_add_connection_status.sql` | `gbp_connections.status` が無く、失効した連携の判定ができない |
+| `20261020120600_limit_gbp_connections_grant.sql` | トークン列が列単位権限で保護されない |
+| `20261020120700_create_stripe_events.sql` | `stripe_events` テーブル自体が無い（webhookの冪等性が働かない） |
+| `20261020120800_add_reply_source.sql` | `posted_via` が無く、返信の出所が判定できない |
+| `20261021100000_add_stripe_event_processing.sql` | `processed_at` が無く、webhookの再送が取りこぼされる |
+| `20261021110000_add_auto_reply_attempts.sql` | `auto_reply_attempts` が無く、繰り返し失敗するレビューが自動返信の対象を占有する |
+| `20261021120000_add_claimed_by.sql` | `claimed_by` が無く、実行中の排他を他実行に奪われる |
+| `20261021130000_revoke_anon_gbp_connections.sql` | `anon` に `gbp_connections` の select 権限が残る |
+
+- [ ] Supabase SQL Editor でファイル名順に9本を実行する
+      （`reviews` / `gbp_connections` / `stripe_events` は先行マイグレーションで作られるため、**先に `20261019120000` 〜 `20261020120300` が適用済み**である必要があります）
+- [ ] 各ファイルの末尾の「実行結果の確認」クエリで列と権限を確認した
+- [ ] **コードのデプロイより先に適用する**（`stripe_events.processed_at` をSELECTするwebhook側は縮退分岐を持たないため）
+- [ ] 適用後、PostgREST のスキーマキャッシュ更新（数秒〜十数秒）を待ってから自動返信を再開する
+
+---
+
+## 13. 今回決まった残タスク（実装は済・設定と運用）
+
+### 外部設定（コードでは解決できない項目）
+
+- [ ] **価格を決める** — 月額1プランのみ。**¥2,980（税込）を推奨**。競合（AI専用ツール ¥4,980 / Pro ¥14,980、MEO代行 ¥3〜10万円）に対し40%安で、AI 1返信あたりの実コストは約¥0.19（Gemini 3.5 Flash-Lite、1店舗200件上限でも十分賄える）。`STRIPE_PRICE_ID` の設定と税込表記（`tax_behavior: inclusive`）も同時に
+- [ ] **Stripeの `STRIPE_PRICE_ID` を設定する**（未設定の間は「決済設定がまだ完了していません」と表示され、契約ボタンが出ない）
+- [ ] **Supabase の Google provider を有効化する** — 別OAuthクライアント（`https://<project-ref>.supabase.co/auth/v1/callback`）と、Redirect URL に `https://<本番ドメイン>/auth/confirm` の追加が必要。GBP用（`business.manage`）とは別クライアントにすること
+- [ ] **Googleのアクセス承認（審査）** — 未完了なら実店舗への提供ができない。GBP API と Googleサインイン（同意画面）の審査は別々
+
+### 運用・判断
+
+- [ ] **レビュー一覧の表示上限（50件）と取得件数（200件）の区別** — 一覧は「全店舗合算・返信済み含む最新50件」。取得は1店舗200件。ランディングの表現と実装を揃えるか、一覧の上限を引き上げるかを決める
+- [ ] **CSPの段階導入** — 現在は意図的に未設定（Next.jsのインラインスクリプトで壊れるため）。`connect-src` に `https://*.supabase.co` を含めてから段階的に絞る
+- [ ] **Stripe Webhook の `invoice.payment_failed` を明示的に扱うか** — 現在は `customer.subscription.updated` 経由で `past_due` に到達する
+- [ ] **未契約の無料枠の回数制限** — 現状は制限なし（1返信¥0.19 のため実害は小さい）。自動実行は契約者限定なので暴走しない
+- [ ] **API利用量の上限** — `listReviews` は1店舗200件で打ち切るが、200件を超える店舗は古いレビューが取得されない。プランに店舗数上限を入れる場合は再検討
+
+### 監視
+
+- [ ] **エラー監視の導入**（Cloudflare Logs / Sentry）— `stripe_events.processed_at IS NULL` の行が増えたら取りこぼしの兆候
+- [ ] **店舗ごとの「AI返信が自動投稿される」ことの事前周知**（公開レビューになる点）
+- [ ] 自動投稿ではなく「生成→確認→投稿」の2段階にする案も検討（誤投稿リスク回避）— 現状は生成→投稿の1クリック
+
+---
+
 ## 完了確認コマンド
 
 ```bash
 npm run lint
+npm run typecheck
+npm run build
 # メモリ不足（Zone Allocation failed）で失敗する場合は
 set NODE_OPTIONS=--max-old-space-size=6144 && npm run build   # Windows (cmd)
 NODE_OPTIONS=--max-old-space-size=6144 npm run build         # macOS / Linux
 ```
+
+### 検証スクリプト（本番DBを書き換えるため同意が必要）
+
+```powershell
+# PowerShell
+$env:ALLOW_LIVE_DB="1"; npx tsx scripts/verify-paywall.ts
+```
+
+```bash
+# bash / zsh
+ALLOW_LIVE_DB=1 npx tsx scripts/verify-paywall.ts
+```
+
+- `ALLOW_LIVE_DB=1` が無いと**データに触れずに**非ゼロ終了する
+- 終了時に `profiles` 行は元どおり復元される（元の行が無ければ削除）
+- 対象: `verify-paywall`（28項目）/ `verify-reply-idempotency`（7項目）/ `verify-resilience`（33項目）/ `verify-signup-trigger`
+- `setup-all.sql` の整合性: `npm run setup:sql:check`
 
 ---
 
@@ -298,3 +405,7 @@ NODE_OPTIONS=--max-old-space-size=6144 npm run build         # macOS / Linux
 - `next dev` は `http://127.0.0.1:3000` だと `allowedDevOrigins` 設定が無いとReactがハイドレーションされない（`next.config.ts` で設定済み）
 - Supabaseは `example.com` などの予約ドメインを新規登録に拒否する（テスト時は実在ドメインを使う）
 - DBマイグレーションは `supabase/setup-all.sql` をSQL Editorで実行すれば何度でも再実行できる
+  - ただし `setup-all.sql` は `npm run setup:sql` で再生成する（手で編集しない）
+- `npm run deploy` は `build:cf` を通る。`build:cf` は `.env.local` を退避してからビルドし、生成物に秘密情報が混ざっていないか検査して、ビルド後に必ず復元する
+- `npm install` を `NODE_ENV=production` で行うと **devDependencies が剪定される**。`npm install --include=dev` を使う
+- `tsx` は devDependencies に入っている。`npx tsx` は実行時にダウンロードされるため使わない
