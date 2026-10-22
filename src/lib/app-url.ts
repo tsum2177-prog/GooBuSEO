@@ -25,7 +25,7 @@ export function getAppUrlOrRequestOrigin(requestUrl: string): string {
   try {
     return getAppUrl();
   } catch {
-    console.error("APP_URL is not set; falling back to the request origin");
+    console.error("APP_URL が設定されていないため、リクエストの origin にフォールバックします");
     return new URL(requestUrl).origin;
   }
 }

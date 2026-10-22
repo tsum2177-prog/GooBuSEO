@@ -79,13 +79,13 @@ export async function getSubscriptionStatus(
       .maybeSingle();
 
     if (error) {
-      console.error("failed to read subscription status", error);
+      console.error("契約状態を読み取れませんでした", error);
       return "none";
     }
 
     return parseSubscriptionStatus(data?.subscription_status);
   } catch (error) {
-    console.error("failed to read subscription status", error);
+    console.error("契約状態を読み取れませんでした", error);
     return "none";
   }
 }

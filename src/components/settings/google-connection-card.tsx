@@ -59,20 +59,18 @@ export function GoogleConnectionCard({
           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             <p className="font-medium">Google連携の権限が失効しています</p>
             <p className="mt-1">
-              {revokedCount}件の店舗でアクセス権が失効しました。
-              下の「Googleマップと連携する」からGoogleに再ログインすると、
-              連携が更新されます。リンクできる店舗に無い場合は「連携を解除」で削除してください。
+              {revokedCount}件の店舗でアクセス権が失効しました。下の「Googleマップと連携する」からGoogleに再ログインすると、連携が更新されます。連携できる店舗に無い場合は「連携を解除」で削除してください。
             </p>
           </div>
         )}
         {!googleConfigured ? (
           <p className="text-sm text-muted-foreground">
-            Google連携用の設定がまだ完了していません。管理者による設定が必要です。
+            Google連携の設定がまだ完了していません。管理者による設定が必要です。
           </p>
         ) : locations.length === 0 ? (
           <>
             <p className="text-sm text-muted-foreground">
-              連携すると、お店のGoogleマッププロフィールをこのアプリで管理できます。
+              連携すると、店舗のGoogleマッププロフィールをこのアプリで管理できます。
             </p>
             <a
               href="/api/google/oauth/start"

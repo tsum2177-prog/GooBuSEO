@@ -10,10 +10,11 @@ import {
 } from "@/lib/billing";
 import { replyToReview, getReviewReply } from "@/lib/google/business";
 import {
-  getValidAccessToken,
   listConnections,
+  withValidAccessToken,
   type GbpConnection,
 } from "@/lib/google/connections";
+import { GoogleAuthError } from "@/lib/google/oauth";
 import { recordReply } from "@/lib/google/reviews";
 import { claimReviews, releaseReviewClaim } from "@/lib/review-claims";
 import { createClient } from "@/lib/supabase/server";
@@ -143,8 +144,20 @@ export async function generateAndPostReply(
 
   const { review, connection } = prepared.data;
 
-  // 同時に走った自動処理と対象が重ならないよう、排他的に確保する
-  const claimedIds = await claimReviews(user.id, [review.id]);
+  // 同時に走った自動処理と対象が重ならないよう、排他的に確保する。
+  // 排他の確保に失敗した場合は例外が投げられるので、投稿せずに中断する。
+  let claimedIds: string[];
+  try {
+    claimedIds = await claimReviews(user.id, [review.id]);
+  } catch (error) {
+    console.error("レビューの排他取得に失敗しました", error);
+    return {
+      status: "error",
+      message:
+        "他の処理と競合したため、投稿を中止しました。時間をおいて再度お試しください。",
+    };
+  }
+
   if (!claimedIds.includes(review.id)) {
     return {
       status: "error",
@@ -164,13 +177,15 @@ export async function generateAndPostReply(
       seoKeywords: prepared.data.shop.seo_keywords ?? [],
     });
 
-    const accessToken = await getValidAccessToken(connection);
-
     // 投稿する前に、Google側にすでに返信があるかを確認する。
     // 最後の同期以降に、店主がGoogleマップ上で直接返信している可能性がある。
-    const remoteReply = await getReviewReply(review.external_id, accessToken);
+    // 401（アクセスの失効）が起きたときは、接続を `revoked` に保存して
+    // 以降のcronが叩かないようにします。あわせて再連携を促します。
+    const remoteReply = await withValidAccessToken(connection, (accessToken) =>
+      getReviewReply(review.external_id, accessToken)
+    );
     if (remoteReply?.comment) {
-      await releaseReviewClaim(review.id);
+      await releaseReviewClaim(review.id, user.id);
       return {
         status: "error",
         message:
@@ -178,7 +193,9 @@ export async function generateAndPostReply(
       };
     }
 
-    await replyToReview(review.external_id, replyText, accessToken);
+    await withValidAccessToken(connection, (accessToken) =>
+      replyToReview(review.external_id, replyText, accessToken)
+    );
 
     await recordReply({
       reviewId: review.id,
@@ -195,8 +212,18 @@ export async function generateAndPostReply(
       message: "AI返信をGoogleマップに投稿しました。",
     };
   } catch (error) {
-    console.error("reply failed", error);
-    await releaseReviewClaim(review.id);
+    console.error("返信の投稿に失敗しました", error);
+    await releaseReviewClaim(review.id, user.id);
+
+    // 連携の失効は再連携でしか解決しません。倒在地る前に案内します。
+    if (error instanceof GoogleAuthError && error.code === "access_revoked") {
+      return {
+        status: "error",
+        message:
+          "Google連携のアクセスが失効しました。「店舗設定」から再度連携してください。",
+      };
+    }
+
     return {
       status: "error",
       message:
@@ -208,8 +235,8 @@ export async function generateAndPostReply(
 /**
  * AI返信の下書きだけを作ります。
  *
- * Googleマップへは投稿しません。契約前でもAIの出来を確認できるように
- * するためです。下書きはDBに保存しないので、自動返信の対象から外れることは
+ * Googleマップへは投稿しません。契約前でもAIが作った返信を
+ * 確認できるようにするためです。下書きはDBに保存しないので、自動返信の対象から外れることは
  * ありません（保存すると「返信済み」と判定されて自動投稿が飛ばされます）。
  */
 export async function generateReplyDraft(
@@ -257,7 +284,7 @@ export async function generateReplyDraft(
       draft: replyText,
     };
   } catch (error) {
-    console.error("draft generation failed", error);
+    console.error("下書きの作成に失敗しました", error);
     return {
       status: "error",
       message:

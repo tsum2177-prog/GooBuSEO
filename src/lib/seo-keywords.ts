@@ -39,7 +39,7 @@ export function parseSeoKeywords(raw: string): string[] {
     if (!keyword) continue;
     if (keyword.length > MAX_KEYWORD_LENGTH) {
       console.warn(
-        `ignoring an over-long SEO keyword (${keyword.length} characters)`
+        `長すぎるSEOキーワードを無視しました（${keyword.length}文字）`
       );
       continue;
     }

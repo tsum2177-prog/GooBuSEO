@@ -7,9 +7,25 @@
  * - Stripeのサブスクリプション状態のマッピングが正しいこと
  * - getAccessLevel が契約状態とGoogle連携の有無から権限を正しく判定すること
  *
- * 実行: npx tsx scripts/verify-paywall.ts
+ * ⚠ このスクリプトは本番DB（Supabase）を書き換えます。
+ *   - profiles 行の subscription_status を一時的に書き換えます
+ *   - 実行には環境変数 ALLOW_LIVE_DB=1 が必要です
+ *     （未設定ならデータに一切触れずに非ゼロ終了します）
+ *   - 終了時に profiles 行を行全体（email / stripe_customer_id を含む）で
+ *     元へ復元します。元に行が存在しなかった場合は、テストで作った行を削除します
+ *   - Ctrl+C（INTERRUPT）で中断した場合も復元を試みますが、復元できない場合は
+ *     手動で元へ戻す必要があります
+ *
+ * 実行: ALLOW_LIVE_DB=1 npx tsx scripts/verify-paywall.ts
  */
-import fs from "node:fs";
+// live-guard は src/lib より先に読み込みます（server-only マーカーを無効化するため）
+import {
+  assertLiveDbAllowed,
+  loadLocalEnv,
+  registerInterruptRestore,
+  restoreProfile,
+  snapshotProfile,
+} from "./lib/live-guard";
 import { createAdminClient } from "../src/lib/supabase/admin";
 import {
   FREE_MAX_LOCATIONS,
@@ -24,11 +40,15 @@ import { syncReviews } from "../src/lib/google/reviews";
 import { autoReplyPendingReviews } from "../src/lib/google/auto-reply";
 import { hasActiveConnection } from "../src/lib/google/connections";
 
-for (const line of fs.readFileSync(".env.local", "utf8").split(/\r?\n/)) {
-  if (!line || line.startsWith("#") || !line.includes("=")) continue;
-  const i = line.indexOf("=");
-  process.env[line.slice(0, i).trim()] ??= line.slice(i + 1).trim();
-}
+loadLocalEnv();
+
+assertLiveDbAllowed({
+  scriptName: "scripts/verify-paywall.ts",
+  operations: [
+    "profiles 行の subscription_status を一時的に書き換える（終了時に元へ戻す）",
+    "それ以外のテーブルは読み取りのみ",
+  ],
+});
 
 const admin = createAdminClient();
 const USER_ID = "612816f9-86d1-49ae-a082-479f023dec23";
@@ -43,21 +63,28 @@ function check(name: string, pass: boolean, detail = ""): boolean {
 }
 
 async function setStatus(status: string) {
-  // profiles 行が存在しない場合もあるので upsert を使う
+  // profiles 行が存在しない場合もあるので upsert を使う。
+  // subscription_status だけを書き換えるので、他の列（email など）は失われません。
   await admin
     .from("profiles")
     .upsert({ id: USER_ID, subscription_status: status }, { onConflict: "id" });
 }
 
 async function main() {
-  // 元の状態を保存して、最後に必ず復元する
-  const { data: before } = await admin
-    .from("profiles")
-    .select("subscription_status")
-    .eq("id", USER_ID)
-    .maybeSingle();
-  const originalStatus = before?.subscription_status ?? null;
-  console.log(`元の状態: ${originalStatus ?? "（profiles 行なし）"}\n`);
+  // 元の profiles 行を行全体で保存しておく（終了時に元へ戻す）
+  const originalProfile = await snapshotProfile(USER_ID);
+  console.log(
+    originalProfile.existed
+      ? `元の profiles 行を保存しました: subscription_status=${String(
+          originalProfile.row.subscription_status ?? "NULL"
+        )}`
+      : "元の profiles 行は存在しません（終了時にテストで作った行を削除します）\n"
+  );
+
+  // Ctrl+C で中断した場合も、元の状態へ戻すようにします
+  registerInterruptRestore(async () => {
+    await restoreProfile(USER_ID, originalProfile);
+  });
 
   try {
     // --- 1. 状態マッピング ---------------------------------------------
@@ -212,19 +239,14 @@ async function main() {
       (await isSubscribed("00000000-0000-0000-0000-000000000000")) === false
     );
   } finally {
-    if (originalStatus === null) {
-      // 元々profiles行が無ければ、テストで作った行を削除する
-      await admin.from("profiles").delete().eq("id", USER_ID);
-      console.log("\nprofiles 行は元から無かったため削除しました");
-    } else {
-      await setStatus(originalStatus);
-      const { data: after } = await admin
-        .from("profiles")
-        .select("subscription_status")
-        .eq("id", USER_ID)
-        .maybeSingle();
-      console.log(`\n元の状態へ復元しました: ${after?.subscription_status}`);
-    }
+    // 元の profiles 行へ必ず戻す。
+    // 元に行が無ければ、テストで作った行を削除します。
+    await restoreProfile(USER_ID, originalProfile);
+    console.log(
+      originalProfile.existed
+        ? "\n元の profiles 行へ復元しました"
+        : "\n元の profiles 行は存在しなかったので、テストで作った行を削除しました"
+    );
   }
 
   const failed = results.filter((r) => !r.pass);

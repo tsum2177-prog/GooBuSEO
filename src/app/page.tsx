@@ -49,12 +49,12 @@ const reasons = [
 
 const steps = [
   {
-    title: "Googleマップと接続する",
+    title: "Googleマップと連携する",
     body: "アカウント作成後、「Googleマップと連携する」を押してGoogleのログイン画面へ進み、お持ちの店舗を選びます。複数店舗をお持ちの場合は、すべて自動で登録されます。",
   },
   {
     title: "店舗情報を登録する",
-    body: "店舗名、業種、店舗の特徴、SEOキーワードの4つ。AIが返信文を書くときの材料になります。業種は飲食店・美容院・歯科医院など7種類から選べます。",
+    body: "店舗名、業種、店舗の特徴、SEOキーワードの4項目。AIが返信文を書くときの材料になります。業種は飲食店・美容院・歯科医院など7種類から選べます。",
   },
   {
     title: "取得して、返信する",
@@ -64,7 +64,7 @@ const steps = [
 
 const features = [
   "Googleマップとの連携（複数店舗対応）",
-  "1時間ごとのレビュー自動取得（1店舗につき最新50件）",
+  "1時間ごとのレビュー自動取得（1店舗につき最新200件）",
   "点数で書き分けるAI返信生成",
   "Googleマップへの返信投稿",
   "店舗設定（業種・強み・SEOキーワード最大20個）",
@@ -75,7 +75,7 @@ const faqItems = [
   {
     question: "どのレビューが取得されますか？",
     answer:
-      "Googleマップに接続した店舗のレビューです。1店舗につき最新50件が対象で、1時間ごとに取得します。50件を超える場合、古いレビューは自動取得の対象になりません。",
+      "Googleマップと連携した店舗のレビューです。1店舗につき最新200件が対象で、1時間ごとに取得します。200件を超える場合、古いレビューは自動取得の対象になりません。",
   },
   {
     question: "自動で返信が投稿されますか？",
@@ -85,7 +85,7 @@ const faqItems = [
   {
     question: "AIが書いた文は、そのまま公開されますか？",
     answer:
-      "はい。生成された文はそのままGoogleマップの返信として公開されます。自動投稿を避けたい場合は、自動返信スイッチをOFFにしたまま手動で投稿してください。",
+      "はい。生成された文はそのままGoogleマップの返信として公開されます。自動投稿を避けたい場合は、自動返信スイッチをOFFにしたまま手動で投稿してください。URLや記号、装飾が入らないよう整えてから投稿します。",
   },
   {
     question: "どんな情報がAIに使われますか？",
@@ -95,7 +95,7 @@ const faqItems = [
   {
     question: "店舗は複数登録できますか？",
     answer:
-      "はい。1つのアカウントで複数の店舗を連携できます。Googleマップとの接続時に、お使いのアカウントで管理しているすべての店舗が自動登録されます。店舗数が多くても取りこぼしません。",
+      "はい。1つのアカウントで複数の店舗を連携できます。Googleマップとの連携時に、お使いのアカウントで管理しているすべての店舗が自動登録されます。店舗数が多くても取りこぼしません。",
   },
   {
     question: "返信を1回に何件まで投稿しますか？",
@@ -113,17 +113,12 @@ const faqItems = [
       "最後の取得以降にご自身で返信を書いた場合、レビュー返信AIが上書きしてしまわないよう、投稿を中止します。そのレビューは「返信済み」として扱われます。",
   },
   {
-    question: "AIが書いた文は、そのまま公開されますか？",
-    answer:
-      "はい。生成された文はそのままGoogleマップの返信として公開されます。自動投稿を避けたい場合は、自動返信スイッチをOFFにしたまま手動で投稿してください。URLや記号、装飾が入らないよう整えてから投稿します。",
-  },
-  {
     question: "うまくいかなかったときはどうすればよいですか？",
     answer:
       "操作の途中でエラーが出た場合は、エラー画面の「もう一度試す」を押してください。ページの表示に失敗した場合もエラー画面に移動します。続かない場合はお問い合わせください。",
   },
   {
-    question: "Googleマップとの接続に制約はありますか？",
+    question: "Googleマップとの連携に制約はありますか？",
     answer:
       "GoogleのBusiness Profile APIの利用には、Googleによるアクセス承認（審査）が必要です。審査前の段階では、ご自身のアカウントで管理している店舗のみが認識されます。",
   },
@@ -151,7 +146,7 @@ export default async function Home() {
             <div>
               <p className="inline-flex animate-in items-center gap-2 rounded-full border border-brand-border bg-brand-muted px-3 py-1 text-xs font-medium text-brand fade-in-0 slide-in-from-bottom-2 duration-500 motion-reduce:animate-none">
                 <MapPin className="size-3.5" aria-hidden="true" />
-                ローカル店舗向け・Googleマップ レビュー運用
+                ローカル店舗向け・Googleマップのレビュー運用
               </p>
 
               <h1 className="mt-6 animate-in text-4xl font-bold tracking-tight text-balance fade-in-0 slide-in-from-bottom-2 duration-700 delay-100 motion-reduce:animate-none sm:text-5xl">
@@ -190,7 +185,7 @@ export default async function Home() {
                 )}
               </div>
               <p className="mt-4 animate-in text-xs text-muted-foreground fade-in-0 duration-700 delay-350 motion-reduce:animate-none">
-                月額1プラン。Googleマップとの接続は数分で完了します。
+                月額1プラン。Googleマップとの連携は数分で完了します。
               </p>
             </div>
 
@@ -225,7 +220,7 @@ export default async function Home() {
             <div className="flex items-start gap-3">
               <ScanSearch className="mt-0.5 size-5 shrink-0 text-brand" aria-hidden="true" />
               <p className="text-sm">
-                <span className="block font-medium">1店舗につき最新50件</span>
+                <span className="block font-medium">1店舗につき最新200件</span>
                 <span className="text-muted-foreground">
                   未返信のレビューをまとめて一覧表示
                 </span>
@@ -394,8 +389,7 @@ export default async function Home() {
                 公開前に、確認する時間を残す。
               </h2>
               <p className="mt-5 leading-relaxed text-muted-foreground">
-                自動返信スイッチは最初からOFFです。OFFのままでも、レビューを1件ずつ確認しながら「AI返信を作成して投稿」で公開できます。
-                ONにすると取得したレビューには自動で投稿され、履歴では「AIが自動で作成した返信」と区別して記録されます。
+                自動返信スイッチは最初からOFFです。OFFのままでも、レビューを1件ずつ確認しながら「AI返信を作成して投稿」で公開できます。ONにすると取得したレビューには自動で投稿され、履歴では「AIが自動で作成した返信」と区別して記録されます。
               </p>
             </div>
             <div className="rounded-2xl border border-border bg-card p-6 ring-1 ring-foreground/5">

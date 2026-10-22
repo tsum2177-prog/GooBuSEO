@@ -6,19 +6,41 @@
  * - 「GBPが reviewReply を含む」場合にGBP側が優先されることを確認する
  * - claimed_at カラム未適用時に claimReviews() が例外を投げずに fail-soft することを確認する
  *
- * 実行: npx tsx scripts/verify-reply-idempotency.ts
+ * ⚠ このスクリプトは本番DB（Supabase）を書き換えます。
+ *   - reviews / gbp_connections に検証用の行を作成し、終了時に削除します
+ *   - profiles 行の subscription_status を一時的に書き換えます
+ *   - 実行には環境変数 ALLOW_LIVE_DB=1 が必要です
+ *     （未設定ならデータに一切触れずに非ゼロ終了します）
+ *   - 終了時に profiles 行を行全体（email / stripe_customer_id を含む）で
+ *     元へ復元します。元に行が存在しなかった場合は、テストで作った行を削除します
+ *   - Ctrl+C（INTERRUPT）で中断した場合も復元を試みますが、復元できない場合は
+ *     手動で元へ戻す必要があります
+ *
+ * 実行: ALLOW_LIVE_DB=1 npx tsx scripts/verify-reply-idempotency.ts
  */
-import fs from "node:fs";
+// live-guard は src/lib より先に読み込みます（server-only マーカーを無効化するため）
+import {
+  assertLiveDbAllowed,
+  loadLocalEnv,
+  registerInterruptRestore,
+  restoreProfile,
+  snapshotProfile,
+} from "./lib/live-guard";
 import { createAdminClient } from "../src/lib/supabase/admin";
 import { syncReviews } from "../src/lib/google/reviews";
 import { encryptSecret } from "../src/lib/crypto";
 import { claimReviews } from "../src/lib/review-claims";
 
-for (const line of fs.readFileSync(".env.local", "utf8").split(/\r?\n/)) {
-  if (!line || line.startsWith("#") || !line.includes("=")) continue;
-  const i = line.indexOf("=");
-  process.env[line.slice(0, i).trim()] ??= line.slice(i + 1).trim();
-}
+loadLocalEnv();
+
+assertLiveDbAllowed({
+  scriptName: "scripts/verify-reply-idempotency.ts",
+  operations: [
+    "profiles 行の subscription_status を一時的に書き換える（終了時に元へ戻す）",
+    "reviews に検証用の行を作成・削除する",
+    "gbp_connections に検証用の行を作成・削除する",
+  ],
+});
 
 const admin = createAdminClient();
 
@@ -62,25 +84,36 @@ async function main() {
     return originalFetch(input as RequestInfo, init);
   }) as typeof fetch;
 
+  // 元の profiles 行を行全体で保存しておく（終了時に元へ戻す）
+  const originalProfile = await snapshotProfile(USER_ID);
+  console.log(
+    originalProfile.existed
+      ? `元の profiles 行を保存しました: subscription_status=${String(
+          originalProfile.row.subscription_status ?? "NULL"
+        )}`
+      : "元の profiles 行は存在しません（終了時にテストで作った行を削除します）\n"
+  );
+
   async function cleanup() {
+    globalThis.fetch = originalFetch;
     await admin.from("reviews").delete().eq("external_id", EXTERNAL_ID);
     await admin.from("gbp_connections").delete().eq("location_id", LOCATION_ID);
+    await restoreProfile(USER_ID, originalProfile);
   }
+
+  // Ctrl+C で中断した場合も、元の状態へ戻すようにします
+  registerInterruptRestore(cleanup);
 
   /**
    * レビュー取得は契約中のみ実行されるため、テスト中は契約済みにしておく。
+   *
+   * subscription_status だけを書き換えるため、他の列（email / stripe_customer_id
+   * など）は失われません。元の状態は終了時の restoreProfile で戻します。
    */
-  async function setSubscribed(subscribed: boolean) {
-    if (subscribed) {
-      await admin
-        .from("profiles")
-        .upsert(
-          { id: USER_ID, subscription_status: "active" },
-          { onConflict: "id" }
-        );
-    } else {
-      await admin.from("profiles").delete().eq("id", USER_ID);
-    }
+  async function setSubscriptionStatus(status: string) {
+    await admin
+      .from("profiles")
+      .upsert({ id: USER_ID, subscription_status: status }, { onConflict: "id" });
   }
 
   async function seed(replyText: string | null) {
@@ -112,7 +145,7 @@ async function main() {
 
   try {
     // レビュー取得は契約中のみ実行されるため、テスト中は契約済みにする
-    await setSubscribed(true);
+    await setSubscriptionStatus("active");
 
     // ダミーの連携行（有効期限は未来なのでGoogleにはアクセスしない）
     await admin.from("gbp_connections").upsert(
@@ -145,7 +178,7 @@ async function main() {
     const syncResult = await syncReviews(USER_ID);
     const afterCase1 = await readReply();
 
-    // claimed_at（マイグレーション6）や posted_via（8）が未適用でも、
+    // claimed_at（マイグレーション6）や posted_via（10）が未適用でも、
     // upsertがこれらの列を持たないため同期そのものは失敗しないことを確認する。
     // 列を入れると未適用環境でリクエストごと失敗し、「未返信」と誤判定される。
     results.push(
@@ -252,10 +285,9 @@ async function main() {
       )
     );
   } finally {
-    globalThis.fetch = originalFetch;
+    // テストデータを削除し、元の profiles 行へ戻す
     await cleanup();
-    await setSubscribed(false);
-    console.log("\n--- テストデータを削除しました ---");
+    console.log("\n--- テストデータを削除し、元の状態へ復元しました ---");
   }
 
   const failed = results.filter((r) => !r.pass);

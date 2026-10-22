@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# ビルド検証のみを行う。STRIPE_* や GEMINI_API_KEY などの
+# 外部サービスの資格情報は CI には設定しない。
+# （未設定でも next build が通る設計になっている）
+
+# 読み取り専用の権限に限定する（ビルドしかしないため）
+permissions:
+  contents: read
+
+# 同じ ref への連続 push では、古い実行を打ち切る
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリを取得する
+        uses: actions/checkout@v4
+
+      - name: Node.js をセットアップする
+        uses: actions/setup-node@v4
+        with:
+          # Node 20 は 2026-04-30 に EOL 済みのため 22 を使う。
+          # wrangler（devDependencies）も Node >= 22 を要求する。
+          node-version: 22
+          cache: npm
+
+      - name: 依存関係をインストールする
+        run: npm ci
+
+      - name: ESLint を実行する
+        run: npm run lint
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリを取得する
+        uses: actions/checkout@v4
+
+      - name: Node.js をセットアップする
+        uses: actions/setup-node@v4
+        with:
+          # Node 20 は 2026-04-30 に EOL 済みのため 22 を使う。
+          # wrangler（devDependencies）も Node >= 22 を要求する。
+          node-version: 22
+          cache: npm
+
+      - name: 依存関係をインストールする
+        run: npm ci
+
+      - name: 型チェックを実行する
+        run: npx tsc --noEmit
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: リポジトリを取得する
+        uses: actions/checkout@v4
+
+      - name: Node.js をセットアップする
+        uses: actions/setup-node@v4
+        with:
+          # Node 20 は 2026-04-30 に EOL 済みのため 22 を使う。
+          # wrangler（devDependencies）も Node >= 22 を要求する。
+          node-version: 22
+          cache: npm
+
+      - name: 依存関係をインストールする
+        run: npm ci
+
+      - name: ビルドする
+        run: npm run build

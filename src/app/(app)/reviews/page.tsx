@@ -37,7 +37,7 @@ export default async function ReviewsPage() {
       <div>
         <h1 className="text-2xl font-bold">レビュー履歴</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Googleマップから取得したレビューと、送信済みの返信です。
+          Googleマップから取得したレビューと、投稿済みの返信です。
         </p>
       </div>
       {!access.canPostReplies && <SubscriptionNotice />}

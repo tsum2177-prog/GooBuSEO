@@ -91,7 +91,7 @@ export async function syncReviewsAction(): Promise<SettingsActionState> {
     failures = result.failures;
     allRevoked = result.allRevoked;
   } catch (error) {
-    console.error("review sync failed", error);
+    console.error("レビュー同期に失敗しました", error);
     return {
       status: "error",
       message: "レビューを取得できませんでした。時間をおいて再度お試しください。",
@@ -104,7 +104,7 @@ export async function syncReviewsAction(): Promise<SettingsActionState> {
     const auto = await autoReplyPendingReviews(user.id);
     replied = auto.replied;
   } catch (error) {
-    console.error("auto reply failed", error);
+    console.error("自動返信に失敗しました", error);
   }
 
   revalidatePath("/reviews");
@@ -157,7 +157,7 @@ export async function disconnectGoogleAction(
     revalidatePath("/settings");
     return { status: "success", message: "連携を解除しました。" };
   } catch (error) {
-    console.error("disconnect failed", error);
+    console.error("連携の解除に失敗しました", error);
     return {
       status: "error",
       message:

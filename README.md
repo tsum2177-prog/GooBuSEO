@@ -1,6 +1,6 @@
 # レビュー返信AI
 
-ローカル店舗向けの「Googleマップ レビュー自動返信SaaS」。
+ローカル店舗向けの「Googleマップのレビュー自動返信SaaS」。
 
 Googleマップのレビューを1時間ごとに取得し、評価点に応じてAIが返信文を書いて
 Googleマップへ投稿する。店舗はGoogleマップと接続するだけで、返信作成は自動化できる。
@@ -29,6 +29,7 @@ Googleマップへ投稿する。店舗はGoogleマップと接続するだけ�
 9. [ディレクトリ構成](#9-ディレクトリ構成)
 10. [運用メモ](#10-運用メモ)
 11. [既知の制約](#11-既知の制約)
+12. [セキュリティと CI](#12-セキュリティと-ci)
 
 ---
 
@@ -47,6 +48,11 @@ Googleマップへ投稿する。店舗はGoogleマップと接続するだけ�
 | レビュー取得（1時間ごとのcron + 手動実行） | `src/app/api/reviews/sync/route.ts`, `src/lib/google/reviews.ts` |
 | AI返信生成（Gemini / `gemini-3.5-flash-lite`） | `src/lib/ai.ts` |
 | 返信の自動投稿・手動投稿 | `src/lib/google/auto-reply.ts`, `src/app/(app)/reviews/actions.ts` |
+| 返信の品質チェック（日本語・長さ・URL・電話番号・レビュー依頼の除外） | `src/lib/ai.ts` |
+| 投稿前の既存返信チェック（二重投稿の防止） | `src/lib/google/business.ts`, `src/lib/google/auto-reply.ts` |
+| Google API のエラー分類と再試行（429 / 5xx / 401） | `src/lib/google/api-error.ts`, `src/lib/google/business.ts` |
+| アプリ全体のセキュリティヘッダー | `next.config.ts` |
+| CI（lint / typecheck / build） | `.github/workflows/ci.yml` |
 | 公開ランディングページ | `src/app/page.tsx` |
 
 ---
@@ -77,12 +83,14 @@ Cloudflare Cron（1時間ごと）
             ├─ service role クライアントで全ユーザーを列挙
             └─ ユーザーごとに
                  ├─ syncReviews(userId)
-                 │    ├─ GBP API から最新50件を取得
+                 │    ├─ GBP API から最新200件まで取得（`nextPageToken` を回して全ページ）
                  │    └─ reviews へ upsert（onConflict: user_id,external_id）
                  └─ autoReplyPendingReviews(userId)
                       ├─ shop_settings.auto_reply_enabled が true のときのみ
                       ├─ reply_text が null のレビューを published_at 順に処理
+                      │   （auto_reply_attempts が上限に達したレビューは除外）
                       ├─ generateReply() → Gemini
+                      ├─ Googleマップ上に既存の返信が無いか確認 → あれば投稿せず取り込み
                       ├─ replyToReview() → GBP API（PUT /{review}/reply）
                       └─ reviews を更新（reply_text / replied_at / auto_replied=true）
 ```
@@ -100,11 +108,13 @@ Cloudflare Cron（1時間ごと）
 - `src/lib/google/reviews.ts` は、GBPの応答に `reviewReply` が含まれない場合に
   ローカル保存済みの `reply_text` / `replied_at` を**上書きせず持ち越します**。
   これをしないと「未返信」と判定され、同じレビューへ別の文章で再投稿されます。
-- `src/lib/review-claims.ts` の `claimReviews()` は、処理対象の行に `claimed_at` を
-  条件付きUPDATEで設定して確保します。同時実行しても同じ行を確保できるのは一方だけです。
-  10分以上取り残されたclaimは次の実行で回収します。
+- `src/lib/review-claims.ts` の `claimReviews()` は、処理対象の行に `claimed_at` と
+  `claimed_by`（実行固有のID）を条件付きUPDATEで設定して確保します。同時実行しても
+  同じ行を確保できるのは一方だけです。30分以上取り残されたclaimは次の実行で回収します
+  （自分が今回確保した行は、回収の対象から外します）。
 - 手動投稿（`src/app/(app)/reviews/actions.ts`）も、返信済みレビューを拒否し、
   投稿前に同じclaimを取得します。
+- どちらの経路も、投稿の直前にGoogleマップ上の返信を読み、既にある場合は投稿しません。
 
 **2. DB層 — トリガーで強制する**
 
@@ -113,8 +123,11 @@ Cloudflare Cron（1時間ごと）
   `reply_text` が `NULL` へ変わろうとした場合に旧値へ戻します。
   アプリ層で漏れた経路でも、公開済み返信が失われることはありません。
 
-> `claimed_at` カラムは同マイグレーションで追加します。未適用の場合は
-> 排他制御が無効ですが、自動返信自体は動作し続けます（ログに警告が出ます）。
+> `claimed_at` カラムは同マイグレーション、`claimed_by` カラムは
+> `20261021120000_add_claimed_by.sql` で追加します。
+> `claimed_by` が未適用の環境では `claimed_at` のみで排他が働きます（ログに警告が出ます）。
+> `claimed_at` すら未適用の場合は排他制御が無効ですが、自動返信自体は動作し続けます
+> （ログに警告が出ます）。
 
 ### 連携エラーの分離と失効トークンの扱い
 
@@ -124,7 +137,9 @@ Cloudflare Cron（1時間ごと）
 |---|---|
 | 店舗ごとの取得 | `syncReviews()` は接続単位で try/catch します。失敗した店舗は `failures` に記録され、残りの店舗は処理が続行されます |
 | 取得と自動返信の分離 | cron（`/api/reviews/sync`）と「レビューを取得する」は、取得が失敗しても自動返信の処理を必ず実行します |
+| 一時的な失敗 | 429（クォータ超過）と5xxは最大3回、指数バックオフ（500ms → 1000ms → 2000ms）で再試行します。`Retry-After` ヘッダがあればその秒数を優先します |
 | トークンの失効 | Googleのトークン更新が `invalid_grant`（権限解除・失効）を返すと、その連携を `status='revoked'` として保存し、以後の処理対象から外します |
+| API が 401 を返す | トークンが有効でもGBP APIだけが401を返す場合（Google側で権限が外れたとき）は、その連携を `status='revoked'` として保存し、以後の処理対象から外します |
 | 失効した連携の通知 | `/settings` に「Google連携の権限が失効しています」の案内と「再連携が必要」バッジを表示します。再度連携すると `status` は `active` に戻ります |
 | 自動返信のトークン取得 | 店舗ごとに1回だけアクセストークンを取得します。取得に失敗した店舗は、その/reviewsだけ処理しません |
 
@@ -225,8 +240,13 @@ proxyのmatcherから除外しています。
 |---|---|---|
 | `id` | text | PK。StripeのイベントID |
 | `created_at` | timestamptz | NOT NULL, default `now()` |
+| `processed_at` | timestamptz | 処理が成功した時刻。NULL のままなら「未処理」 |
+| `attempts` | integer | NOT NULL, default `0`。処理に失敗した回数（再送のたびに増える） |
 
 RLSを有効にしたままポリシーを持たせています。service role 経由でしか読み書きできません。
+
+> 旧実装で記録済みの行は、`20261021100000_add_stripe_event_processing.sql` により
+> 「処理済み」（`processed_at` に `created_at` を設定）として扱われます。
 
 ### `shop_settings` — 店舗ごとの設定（ユーザー1行）
 
@@ -257,9 +277,11 @@ RLSを有効にしたままポリシーを持たせています。service role �
 | `auto_replied` | boolean | NOT NULL, default `false`。手動=false / 自動=true |
 | `posted_via` | text | CHECK (`ai_manual` / `ai_auto`)。AIが投稿したかを示す。NULL は取得で同期したもの（出所が分からない） |
 | `claimed_at` | timestamptz | 自動返信の排他制御用。処理対象の行を条件付きUPDATEで確保し、同時実行による二重投稿を防ぐ |
+| `claimed_by` | text | 自動返信の排他制御用。確保した実行の固有ID。`claimed_at` だけでは「誰が確保したか」が分からず、実行中の処理が回収対象になるため、確保した所有者を記録する |
+| `auto_reply_attempts` | integer | NOT NULL, default `0`。自動返信の試行回数。上限（5回）に達したレビューは自動返信の対象から外す（他のレビューに処理枠を回すため） |
 | `created_at` | timestamptz | NOT NULL, default `now()` |
 
-インデックス: `(user_id, published_at desc)`, `(user_id, claimed_at)`
+インデックス: `(user_id, published_at desc)`, `(user_id, claimed_at)`, `(user_id, auto_reply_attempts)`
 
 ### `gbp_connections` — Google連携トークン
 
@@ -289,7 +311,8 @@ Stripe は一度以上送信してきます（at-least-once）。対応は3段�
 
 | 対策 | 実装 |
 |---|---|
-| 重複処理の遮断 | 処理前に `stripe_events` へイベントIDを挿入し、既存なら即 return |
+| 重複処理の遮断 | イベントIDを `stripe_events` に記録し、**処理が成功したあと**に `processed_at` を設定します。`processed_at` が設定済みのイベント（Stripeの再送）は即座に200を返してスキップします |
+| 失敗したイベントの取りこぼし防止 | 処理途中で失敗すると `processed_at` を記録しないため、Stripeの再送で必ず処理し直されます。失敗のたびに `attempts` が増えるので、再送を繰り返すイベントを後から把握できます |
 | 遅延イベントの遮断 | `profiles.stripe_event_created_at` と比較し、古いイベントは破棄 |
 | 削除済みユーザー | FK違反（`auth.users`）なら 500 を返さず 200 を返して再送ループを防ぐ |
 
@@ -335,10 +358,31 @@ Supabase の **SQL Editor** で `supabase/migrations/` のファイルを**順�
 8. `20261020120600_limit_gbp_connections_grant.sql`（`gbp_connections` のトークン列を列単位のGRANTに）
 9. `20261020120700_create_stripe_events.sql`（`stripe_events` テーブル / `profiles.stripe_event_created_at`）
 10. `20261020120800_add_reply_source.sql`（`reviews.posted_via`）
+11. `20261021100000_add_stripe_event_processing.sql`（`stripe_events.processed_at` / `stripe_events.attempts`）
+12. `20261021110000_add_auto_reply_attempts.sql`（`reviews.auto_reply_attempts`）
+13. `20261021120000_add_claimed_by.sql`（`reviews.claimed_by`）
+14. `20261021130000_revoke_anon_gbp_connections.sql`（`gbp_connections` の `anon` ロールの select 権限を revoke）
+
+> **適用順は「マイグレーション → コード」の順**です。
+> 11〜14のマイグレーションを適用してから、そのマイグレーションを前提とするコードを
+> デプロイしてください。逆順（コードを先にデプロイしてマイグレーションを後で適用する）と、
+> 排他制御や試行回数の列がDBに存在しない状態で動作します。
+>
+> 特に `20261021120000_add_claimed_by.sql` が未適用の環境では `claimed_at` のみで排他が
+> 働きます（処理は続行し、ログに警告が出ます）。排他は失われませんが、所有者の概念が
+> 失われるため、**二重投稿のリスクがあります**。
 
 `supabase/setup-all.sql` は全マイグレーションをまとめた**冪等**なスクリプトです。
 几次実行しても失敗しません（`create table if not exists` / `drop policy if exists` / トランザクションで囲み +
 末尾の確認クエリ付き）。
+
+> **`supabase/setup-all.sql` は手で編集しないでください。**
+> `supabase/migrations/` のファイルをファイル名順に連結したもので、次で再生成します。
+>
+> ```bash
+> npm run setup:sql          # 再生成
+> npm run setup:sql:check    # 差分チェック（一致していなければ非ゼロ終了）
+> ```
 
 ---
 
@@ -401,6 +445,34 @@ Stripeからのイベント受信。
 | `src/app/(app)/billing/actions.ts` | `createCheckoutSession` | Stripe Checkout Session の作成とリダイレクト |
 | | `createPortalSession` | Stripe Billing Portal へのリダイレクト |
 
+### Google Business Profile API クライアント
+
+`src/lib/google/business.ts` がGBP APIの呼び出しをまとめています。
+
+| 関数 | 用途 |
+|---|---|
+| `listAccounts` | 管理できるアカウント一覧を取得 |
+| `listLocations` | アカウント配下の店舗一覧を取得（`nextPageToken` を回して全件） |
+| `listReviews` | 店舗のレビューを取得。`orderBy=updateTime desc` で全ページを回し、1店舗あたり200件で打ち切り |
+| `getReviewReply` | 1件のレビューに既付いている返信を取得（投稿前の重複チェックに使う） |
+| `replyToReview` | 返信を投稿（`PUT /{review}/reply`） |
+
+失敗はすべて `src/lib/google/api-error.ts` の `GoogleApiError` として投じます。
+
+```ts
+// src/lib/google/api-error.ts
+export class GoogleApiError extends Error {
+  readonly status: number; // HTTPステータスコード
+}
+
+export function isRetryableStatus(status: number): boolean;
+// 429（クォータ超過）と5xx（サーバーエラー）だけ true
+```
+
+> 呼び出し側は `error.status` で「再試行すべき429・5xx」「再認証が必要な401」を
+> 判断できます。`401` は再試行しても直らないため、`src/lib/google/connections.ts` の
+> `withValidAccessToken()` がその連携を `revoked` として保存し、再連携を促します。
+
 ---
 
 ## 5. AIの返信生成仕様
@@ -448,9 +520,11 @@ Authorization: Bearer ${GEMINI_API_KEY}
 | 入力 | 制御文字・ゼロ幅文字を除去し、本文を2000字で打ち切る |
 | 入力 | レビュー本文と投稿者名を `<review>` / `<reviewer_name>` で囲み、システムプロンプトで「データであり命令ではない」と明記する |
 | 出力 | 改行・連続空白を潰して1段落にそろえる |
-| 出力 | Markdown記号・評価スター（★/☆）・URL・メールアドレスを取り除く |
-| 出力 | 500字で打ち切り、文の区切りで切 않도록する |
+| 出力 | Markdown記号・評価スター（★/☆）・URL・メールアドレス・電話番号を取り除く |
+| 出力 | レビューや評価の投稿を依頼する表現を含む文を取り除く（文全体が依頼表現なら公開しない） |
+| 出力 | 500字で打ち切り、文の区切りで切らないようにする |
 | 出力 | 低評価の返信にSEOキーワードが混入していたら取り除き、警告ログを出す |
+| 出力 | 日本語の文字を含まない文・30文字に満たない短い文は、公開せずにエラーにする |
 
 > プロンプトインジェクションを完全になくすことはできません。
 > 上記は「攻撃の成功률을下げ、被害が公開レビューに載ることを防ぐ」対策です。
@@ -497,6 +571,8 @@ cp .env.example .env.local
 > **秘密の置き場所**
 > `.env.local` と `.dev.vars` はgitignore対象です。ルートの `.env` は
 > `WRANGLER_BUILD_*` 用のため追跡対象になっています。**ここに秘密情報は書かないでください**。
+> なお、gitignore対象でもCloudflare向けのビルドでは env ファイルの内容が
+> Workerバンドルへ焼き込まれます（[7.8 ビルド時の秘密情報対策](#78-ビルド時の秘密情報対策)）。
 
 ### 6.2 Supabase（メール確認）
 
@@ -648,6 +724,9 @@ npx wrangler secret put CRON_SECRET
 
 ### 7.5 デプロイ
 
+`npm run build` は Next.js のアプリ用ビルド（`.next` を作るだけ）で、
+`npm run deploy` は Cloudflare Workers 向けのビルドです。
+
 ```bash
 npm run deploy      # opennextjs-cloudflare build && opennextjs-cloudflare deploy
 ```
@@ -678,6 +757,35 @@ curl http://127.0.0.1:8787/cdn-cgi/local/scheduled
 | R2 / D1 / Durable Objects は**不要** | 全ルートが動的（SSR）のため、キャッシュ設定なしで動作します |
 | Windowsでのビルドは非推奨 | 公式は WSL または CI（GitHub Actions）でのビルドを推奨。`npm run deploy` は Windows でも動作します |
 
+### 7.8 ビルド時の秘密情報対策
+
+OpenNext のビルド（`opennextjs-cloudflare build`）は、プロジェクト直下の env ファイルを
+読み取り、その中身を**平文で** Worker バンドル（`.open-next/cloudflare/next-env.mjs`）へ
+書き込みます。`.env.local` が `.gitignore` 済みでも、**デプロイ物には入ります**。
+ソースには無いはずの service_role キーやトークン暗号鍵が、そのまま公開される恐れがあります。
+
+そこで `scripts/build-cloudflare.ts` を使ってビルドしてください。
+
+```bash
+npm run build:cf
+```
+
+手順は次の4つです。
+
+1. **退避** — 秘密情報を含む env ファイルを退避し、公開情報だけの内容に差し替える
+   （元の内容は同じディレクトリの `.build-backup` に残す）
+2. **ビルド** — `opennextjs-cloudflare build` を実行する
+3. **検査** — 生成された `.open-next/cloudflare/next-env.mjs` に秘密情報が混ざっていないか確認する
+4. **復元** — ビルドの成否にかかわらず元の env ファイルを戻す
+
+**検査で秘密情報が検出された場合は、終了コードが非ゼロになります。**
+そのまま `opennextjs-cloudflare deploy` を実行しないでください。
+
+> `npm run build:cf` で秘密情報を退避したうえで Cloudflare向けのビルドを実行できます。
+> `npm run deploy` / `npm run preview` / `npm run upload` は
+> いずれも `build:cf` を通るため、直接 `opennextjs-cloudflare build` を
+> 実行しないでください。
+
 ---
 
 ## 8. 検証手順
@@ -700,8 +808,10 @@ curl http://127.0.0.1:8787/cdn-cgi/local/scheduled
 14. 低評価（1〜3点）の返信にSEOキーワードが入っていないこと、高評価（4〜5点）には入っていること
 15. 「業種」を設定した状態で返信を生成すると、業種に合った言い回しになること
 16. 返信済みのレビューで「AI返信を作成して投稿」を押すと「既に返信しています」と表示され、二重投稿されないこと
-17. 未契約の状態で `/reviews` `/settings` に「月額プランが未契約です」の案内が出ること。未返信レビューの返信ボタンが「月額プランのご契約後、返信を投稿できます。」に置き換わること
+17. 未契約の状態で `/reviews` `/settings` に「月額プランが未契約です」の案内が出ること。未返信レビューの返信ボタンが「AI返信を作成（下書き）」になり、Googleマップへは投稿されないこと
 18. 契約後に `/reviews` に「AI返信を作成して投稿」ボタンが現れること
+19. 1店舗のレビューが50件を超えていても、200件まで取得されること
+20. Googleマップ上で店主が返信済みのレビューに、自動返信が二重に投稿されないこと
 
 ### 検証スクリプト
 
@@ -712,10 +822,28 @@ curl http://127.0.0.1:8787/cdn-cgi/local/scheduled
 | `npx tsx scripts/verify-signup-trigger.ts` | 新規登録時に `profiles` 行が自動作成されること（`handle_new_user` トリガー） |
 | `npx tsx scripts/verify-resilience.ts` | 連携単位のエラー分離・失効トークンの検出・プロンプトインジェクション対策・SEOキーワード検証・ページング・cronの回転 |
 
-いずれもライブDBに対して実行し、テストデータは実行の前後で削除します。
+> **⚠ これらのスクリプトは本番DB（Supabase）を書き換えます。**
+> 検証用の行（`auth.users` / `reviews` / `gbp_connections`）を作り、`profiles` 行の
+> `subscription_status` を一時的に書き換えます。実行するには環境変数 **`ALLOW_LIVE_DB=1`** が必要です。
+> 未設定のまま実行すると、**データに触れずに**（DBへ接続もせず）非ゼロ終了します。
+> 終了時には `profiles` 行を元どおり復元します（元の行が無ければ、テストで作った行を削除）。
+>
+> ```powershell
+> # PowerShell
+> $env:ALLOW_LIVE_DB="1"; npx tsx scripts/verify-paywall.ts
+> ```
+>
+> ```bash
+> # bash / zsh
+> ALLOW_LIVE_DB=1 npx tsx scripts/verify-paywall.ts
+> ```
+>
+> 実行前に、対象DBのURLと書き込み的内容が表示されます。表示される内容を確認してから実行してください。
 
 > **注意**: `claimed_at` を使う排他制御（C5）を効かせるには、
 > `20261020120400_add_claim_and_preserve_reply.sql` の適用が必要です。
+> `claimed_by` を使う排他制御（確保した所有者を記録する）を効かせるには、
+> `20261021120000_add_claimed_by.sql` の適用も必要です。
 > 未適用の場合も自動返信は動作しますが、排他制御は効きません（ログに警告が出ます）。
 
 ---
@@ -731,10 +859,13 @@ src/
 │   ├── auth.ts               # 認証済みユーザーの取得（React.cache でメモ化）
 │   ├── billing.ts            # 契約状態の判定（課金のゲート）
 │   ├── crypto.ts             # Googleトークンの暗号化（AES-256-GCM）
-│   ├── review-claims.ts      # 自動返信の排他制御（claimed_at の確保・解放）
+│   ├── review-claims.ts      # 自動返信の排他制御（claimed_at / claimed_by の確保・解放）
 │   ├── seo-keywords.ts       # SEOキーワードの往復と検証
+│   ├── shop-categories.ts    # 業種の選択肢とGoogleマップの業種名への対応表
+│   ├── shop-settings.ts      # Googleマップの店舗情報から店舗設定の初期値を投入
 │   ├── stripe.ts             # Stripeクライアント・価格ラベル取得
 │   ├── google/
+│   │   ├── api-error.ts      # Google API のエラー表現（GoogleApiError / isRetryableStatus）
 │   │   ├── oauth.ts          # OAuth2.0（認証URL・コード交換・トークン更新）
 │   │   ├── business.ts       # Business Profile API（店舗・レビュー取得・返信）
 │   │   ├── connections.ts    # 連携情報の保存とアクセストークン管理
@@ -771,24 +902,32 @@ src/
     └── error/                # 認証エラーページ
 docs/manual.md                # 店舗利用者向けの操作マニュアル
 scripts/                     # 検証スクリプト（ライブDBに対して実行する）
+│   ├── build-cloudflare.ts  # Cloudflare向けのビルド（秘密情報を退避して検査する）
+│   ├── generate-setup-all.ts # supabase/setup-all.sql の再生成（--check で差分検出）
+│   └── lib/live-guard.ts    # 検証スクリプトの保護（ALLOW_LIVE_DB チェック・復元）
 supabase/migrations/          # DBマイグレーションSQL
 supabase/setup-all.sql        # 全マイグレーションの冪等な統合スクリプト
 open-next.config.ts           # OpenNext（Cloudflare Workers）設定
 wrangler.jsonc                # Workers設定（assets・cron・compatibility flags）
 worker.ts                     # Workersカスタムラッパー（cronのscheduled handler）
+next.config.ts                # Next.js設定（セキュリティヘッダー・許可オリジン）
+.github/workflows/ci.yml     # CI（lint / typecheck / build）
 ```
 
 ---
 
 ## 10. 運用メモ
 
-- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得はCloudflareのcron（`wrangler.jsonc` の `triggers.crons`）が1時間ごとに `/api/reviews/sync` を実行します。1店舗につき最新50件まで。**月額プランの契約中のみ**実行されます。
-- **課金のゲート**: レビュー取得・AI返信の生成・投稿は契約中のみ利用できます。判定は `src/lib/billing.ts` の `isSubscribed()` に集約しています。未契約時は `/reviews` と `/settings` に案内バナーを表示し、cronでは静かにスキップします。
-- **自動返信**: `shop_settings.auto_reply_enabled` が true の店舗だけ、取得したレビューへ自動で返信を投稿します（初期値はOFF）。手動で投稿したものは「AIが作成した返信」、自動のものは「AIが自動で作成した返信」と表示されます。処理対象の行は `claimed_at` で排他的に確保するため、cron と手動操作が同時に走っても同じレビューへ二重投稿されません。
+- **レビュー取得**: `/settings` の「レビューを取得する」で手動取得できます。自動取得はCloudflareのcron（`wrangler.jsonc` の `triggers.crons`）が1時間ごとに `/api/reviews/sync` を実行します。1店舗につき最新200件まで取得します。Googleマップの連携があれば**未契約でも取得できます**（未契約は1店舗まで。契約するとすべての店舗が対象です）。
+- **課金のゲート**: 判定は `src/lib/billing.ts` の `getAccessLevel()` に集約しています。Googleマップの連携があれば、レビュー取得・閲覧とAI返信の**下書き作成**までは未契約でも利用できます（未契約は1店舗まで）。Googleマップへの**投稿**と**自動返信**は契約中のみ利用できます。未契約時は `/reviews` と `/settings` に案内バナーを表示し、cronでは投稿・自動返信を静かにスキップします。
+- **自動返信**: `shop_settings.auto_reply_enabled` が true の店舗だけ、取得したレビューへ自動で返信を投稿します（初期値はOFF）。手動で投稿したものは「AIが作成した返信」、自動のものは「AIが自動で作成した返信」と表示されます。処理対象の行は `claimed_at` と `claimed_by` で排他的に確保するため、cron と手動操作が同時に走っても同じレビューへ二重投稿されません。
+- **自動返信の除外**: 同じレビューで投稿が繰り返し失敗すると、そのレビューの `auto_reply_attempts` が増えて上限（5回）に達し、**自動返信の対象から自動的に外れます**（他のレビューに処理枠を回すため）。Googleマップ上に既存の返信が見つかったときや、返信の記録に成功したときは 0 に戻ります。
+- **投稿前の重複チェック**: 手動投稿・自動返信のどちらも、投稿の直前にGoogleマップ上の返信を読みます。既に返信がある場合は上書きせず、投稿を中止します。自動返信では、その返信をアプリ側に取り込みます。
 - **返信の保持**: 一度投稿した返信は、再取得のたびに消えることはありません。GBPの応答に `reviewReply` が含まれない場合も保存済みの返信履歴は保持されます。
-- **AI返信の投稿**: 低評価（1〜3点）は「謝罪・改善案のみ、SEOキーワードは入れない」、高評価（4〜5点）は「感謝 + SEOキーワードを自然に盛り込み」。生成した文はそのままGoogleマップへ投稿されます。
+- **AI返信の投稿**: 低評価（1〜3点）は「謝罪・改善案のみ、SEOキーワードは入れない」、高評価（4〜5点）は「感謝 + SEOキーワードを自然に盛り込み」。生成した文はそのままGoogleマップへ投稿されます。日本語でない・短すぎる・レビューや評価の投稿依頼を含む文は、投稿せずにエラーにします。
 - **トークン管理**: Googleのアクセストークン・リフレッシュトークンは `GOOGLE_TOKEN_ENCRYPTION_KEY` で暗号化して保存しています。キーが変わると再連携が必要です。**本番と開発では別のキーを使ってください。**
-- **トークンの更新**: `getValidAccessToken()` が暗号化されたアクセストークンを復号し、期限（現在時刻+60秒より前）が切れている場合はリフレッシュトークンで更新・再暗号化します。更新が `invalid_grant` で失敗した場合は、その連携を `revoked` として保存し、以後の処理対象から外します。
+- **トークンの更新**: `getValidAccessToken()` が暗号化されたアクセストークンを復号し、期限（現在時刻+60秒より前）が切れている場合はリフレッシュトークンで更新・再暗号化します。更新が `invalid_grant` で失敗した場合は、その連携を `revoked` として保存し、以後の処理対象から外します。トークンが有効でもGBP APIが `401` を返す場合も同じ扱いになり、毎時の取得対象から外れます（`/settings` に「再連携が必要」と表示されます）。
+- **Stripe webhook の記録**: イベントは**処理に成功したあと**に `stripe_events.processed_at` を書いて「処理済み」とします。処理に失敗した場合は記録しないため、Stripeの再送で必ず処理し直されます。失敗のたびに `attempts` が増えるので、再送を繰り返すイベントを後から把握できます。
 - **ベースURL**: 決済リダイレクト・OAuthのredirect_uri・メール確認リンクの遷移先は `APP_URL` の環境変数で固定しています。リクエストのHostヘッダーから求めると改ざんされるためです。
 - **暗号化方式**: AES-256-GCM。形式は `base64(iv).base64(authTag).base64(ciphertext)`。鍵は `GOOGLE_TOKEN_ENCRYPTION_KEY`（64文字のhex = 32バイト）。
 
@@ -800,14 +939,77 @@ worker.ts                     # Workersカスタムラッパー（cronのschedul
 
 | 制約 | 影響 |
 |---|---|
-| レビューの取得件数は最新50件 | 50件を超えると古いレビューは自動取得の対象外 |
+| レビューの取得件数は最新200件 | 200件を超えると古いレビューは自動取得の対象外 |
 | レビュー一覧のページングなし | 全件を一度に読み込みます |
 | `reviews` と `gbp_connections` に insert/update のRLSポリシーがない | service role 経由の一括書き込みのみ。ユーザー操作で直接書き込めない設計です |
 | 契約状態の読み取りは `profiles` 行に依存する | `profiles` 行が無いユーザー（トリガー適用前の既存ユーザー）は未契約として扱われます。契約時にStripeのwebhookが行を作るため実害はありません |
 | 自動返信の1回あたり上限は20件 | `AUTO_REPLY_BATCH_SIZE`。残りは次回の実行に回ります。上限自体は変えられます |
-| 未適用マイグレーションの影響 | `claimed_at` は排他制御、`status` は失効連携の保存、`posted_via` は返信の出所表示、`stripe_events` はwebhookの重複遮断が無効になります。いずれも fail-soft で動きますが、`posted_via` は返信が「AIが作成した返信」と表示されません |
+| 自動返信の試行回数の上限は5回 | `auto_reply_attempts` が5に達したレビューは自動返信の対象から外れます。手動で再試行させるにはSQLで `auto_reply_attempts = 0` に戻します |
+| 未適用マイグレーションの影響 | `claimed_at` は排他制御、`claimed_by` は排他制御の所有者、`status` は失効連携の保存、`posted_via` は返信の出所表示、`auto_reply_attempts` は繰り返し失敗するレビューの除外、`stripe_events.processed_at` はwebhookの重複遮断に必要です。いずれも fail-soft で動きますが、`posted_via` は返信が「AIが作成した返信」と表示されません |
+| `Content-Security-Policy` は未設定 | `next.config.ts` で意図的に入れていません。段階導入のメモは [12. セキュリティと CI](#12-セキュリティと-ci) を参照してください |
 | エラーバウンダリは1ルートのみ | `(app)` 配下と `global-error` / `not-found` は用意していますが、(auth) ページとAPIルートにはありません |
 | ルート直下の `.env` が追跡対象 | `WRANGLER_BUILD_*` を保持するため。秘密情報は `.env.local` / `.dev.vars` / `wrangler secret put` で管理してください |
 | `APP_URL` は必須 | 未設定だと決済のCheckout作成とOAuthの開始が失敗します（`/dashboard?checkout=error` に遷移）。メール確認リンクはリクエストのoriginにフォールバックします。本番では必ず `wrangler secret put APP_URL` を実行してください |
 | (auth) ページとAPIルートにエラーバウンダリがない | 404は `not-found.tsx` を使うが、`/login` `/signup` の例外は素のエラーページになります |
-| テスト・CIが無い | 変更後は `npm run lint` と `npm run build`、および[検証手順](#8-検証手順)による手動確認が必要です |
+| 自動テストが無い | CIは lint / typecheck / build のみです。変更後は [8. 検証手順](#8-検証手順) による手動確認と、検証スクリプトによる実DBでの確認が必要です |
+
+---
+
+## 12. セキュリティと CI
+
+### 12.1 セキュリティヘッダー
+
+`next.config.ts` の `headers()` で、アプリ全体（`/:path*`）に次のヘッダーを付与しています。
+
+| ヘッダー | 値 | 目的 |
+|---|---|---|
+| `X-Content-Type-Options` | `nosniff` | レスポンスの Content-Type を推測させない |
+| `X-Frame-Options` | `DENY` | iframe への埋め込みを禁止する（クリックジャッキング対策） |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | 別オリジンへ遷移するとき、Referer にURL全体を送らない |
+| `Strict-Transport-Security` | `max-age=63072000; includeSubDomains` | https を2年間強制する（本番は https で配信されます） |
+| `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` | カメラ・マイク・位置情報の利用を禁止する |
+
+`Content-Security-Policy` は**意図的に設定していません**。
+このアプリは Next.js の Script とインラインスクリプトを使うため、素のCSPを入れると
+ページが白画面になることがあります。
+
+段階導入する場合は、まず緩い設定で配信し、実害がないことを確認してから
+`'unsafe-inline'` / `'unsafe-eval'` を外す運用にしてください。
+`connect-src` には Supabase のAPI呼び出し先（`https://*.supabase.co`）を
+含める必要があります。ここを絞るとログインやレビュー取得が失敗します。
+
+```ts
+// next.config.ts（段階導入時の例）
+{
+  key: "Content-Security-Policy",
+  value: [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    "connect-src 'self' https://*.supabase.co",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "object-src 'none'",
+  ].join("; "),
+}
+```
+
+### 12.2 CI（GitHub Actions）
+
+`.github/workflows/ci.yml` で、push（`main` ブランチ）とpull requestのたびに
+次の3つを自動実行します。
+
+| ジョブ | 実行するコマンド |
+|---|---|
+| `lint` | `npm run lint` |
+| `typecheck` | `npx tsc --noEmit` |
+| `build` | `npm run build` |
+
+CIには外部サービスの資格情報（`STRIPE_SECRET_KEY` / `GEMINI_API_KEY` など）を
+**設定しません**。未設定でも `next build` が通る設計にしてあるためです。
+
+> `npm run build` はCloudflare向けのビルドではありません（[7.5 デプロイ](#75-デプロイ) を参照）。
+> 本番向けのWorkerバンドルを作る場合は、秘密情報の検査が挟まれた
+> `scripts/build-cloudflare.ts` を使ってください（[7.8 ビルド時の秘密情報対策](#78-ビルド時の秘密情報対策)）。

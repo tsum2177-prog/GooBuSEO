@@ -22,7 +22,7 @@ const googleMessages: Record<string, { text: string; className: string }> = {
       "border-green-200 bg-green-50 text-green-900 dark:border-green-900 dark:bg-green-950 dark:text-green-100",
   },
   no_location: {
-    text: "管理できる店舗が見つかりませんでした。Googleマップ的管理権限があるか確認してください。",
+    text: "管理できる店舗が見つかりませんでした。Googleマップの管理権限があるか確認してください。",
     className: "border-border bg-muted text-foreground",
   },
   need_reconsent: {
@@ -67,8 +67,7 @@ export default async function SettingsPage({
       <div>
         <h1 className="text-2xl font-bold">店舗設定</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          店舗名と業種はGoogleマップから自動で入ります。AIの返信文をより店舗
-          に合わせるために、任意の項目を追加してください。
+          店舗名と業種はGoogleマップから自動で入ります。AIの返信文が店舗に合うように、任意の項目を追加してください。
         </p>
       </div>
       {message && (

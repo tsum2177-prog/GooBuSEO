@@ -18,7 +18,7 @@ export async function createClient() {
               cookieStore.set(name, value, options)
             );
           } catch {
-            // Server Componentではcookieを書き込めないため無視（proxy.tsが更新を担う）
+            // Server Component では cookie を書き込めないため無視（proxy.ts が更新を担う）
           }
         },
       },

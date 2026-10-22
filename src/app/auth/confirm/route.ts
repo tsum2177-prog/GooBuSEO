@@ -37,7 +37,7 @@ export async function GET(request: NextRequest) {
       }
     }
   } catch (error) {
-    console.error("auth confirm failed", error);
+    console.error("メールの確認リンクの処理に失敗しました", error);
   }
 
   return NextResponse.redirect(new URL("/error?reason=confirm", appUrl));

@@ -63,7 +63,7 @@ export async function fetchPriceLabel(): Promise<string | null> {
     cachedPriceLabelAt = now;
     return label;
   } catch (error) {
-    console.error("failed to read the Stripe price label", error);
+    console.error("Stripeの価格ラベルを読み取れませんでした", error);
     return null;
   }
 }

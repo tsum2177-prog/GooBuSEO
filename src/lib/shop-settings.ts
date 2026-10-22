@@ -28,7 +28,7 @@ export async function fillShopSettingsFromLocations(
     .maybeSingle();
 
   if (error) {
-    console.error("failed to read shop settings", error);
+    console.error("店舗設定を読み取れませんでした", error);
     return;
   }
 
@@ -51,7 +51,7 @@ export async function fillShopSettingsFromLocations(
       .update({ shop_name: shopName, category })
       .eq("id", userId);
     if (updateError) {
-      console.error("failed to update shop settings", updateError);
+      console.error("店舗設定を更新できませんでした", updateError);
     }
     return;
   }
@@ -61,6 +61,6 @@ export async function fillShopSettingsFromLocations(
     { onConflict: "id" }
   );
   if (insertError) {
-    console.error("failed to create shop settings", insertError);
+    console.error("店舗設定を作成できませんでした", insertError);
   }
 }

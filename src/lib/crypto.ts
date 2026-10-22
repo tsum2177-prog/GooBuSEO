@@ -1,3 +1,5 @@
+import "server-only";
+
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
 const ALGORITHM = "aes-256-gcm";

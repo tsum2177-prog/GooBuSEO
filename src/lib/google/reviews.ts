@@ -1,6 +1,6 @@
 import { getAccessLevel } from "@/lib/billing";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getValidAccessToken, listConnections } from "./connections";
+import { listConnections, withValidAccessToken } from "./connections";
 import { listReviews, toStarRating } from "./business";
 
 type ExistingReply = {
@@ -27,7 +27,7 @@ export type SyncResult = {
  *
  * GBPのレビュー一覧は、投稿済みレビューでも `reviewReply` が含まれないことが
  * あります（反映遅延や部分的な応答など）。その場合にローカル側の返信履歴を
- * NULLで上書きすると「未返信」と判定され、同じレビューへ二重に投稿されて
+ * NULL で上書きすると「未返信」と判定され、同じレビューへ二重に投稿されて
  * 公開済みの返信が別の文章に上書きされます。既存値を持ち越すために使います。
  */
 async function fetchExistingReplies(
@@ -82,8 +82,12 @@ export async function syncReviews(userId: string): Promise<SyncResult> {
     // 1つの店舗で失敗しても、ほかの店舗は処理を続ける。
     // 失効したトークンを持つ店舗がいても、全体の取得が止まってはいけない。
     try {
-      const accessToken = await getValidAccessToken(connection);
-      const reviews = await listReviews(connection.location_id, accessToken);
+      // 401（アクセスの失効）が起きたときは、接続を `revoked` に保存して
+      // 以降のcronが同じ接続を叩き続けないようにします。
+      // 1店舗で失敗してもループは止まらない（下の catch で失敗情報を記録します）。
+      const reviews = await withValidAccessToken(connection, (accessToken) =>
+        listReviews(connection.location_id, accessToken)
+      );
 
       const existingReplies = await fetchExistingReplies(
         userId,
@@ -96,7 +100,7 @@ export async function syncReviews(userId: string): Promise<SyncResult> {
           if (rating === 0) {
             if (review.starRating) {
               // 未知のレーティングだと無言で取りこぼすので、原因を追えるようにログを残す
-              console.warn("skipping a review with an unknown star rating", {
+              console.warn("未知のレーティングのレビューは取りこぼしました", {
                 externalId: review.name,
                 starRating: review.starRating,
               });
@@ -106,7 +110,7 @@ export async function syncReviews(userId: string): Promise<SyncResult> {
           const existing = existingReplies.get(review.name);
           // upsert に入れる列を「保存履歴の列」に限定している。
           //
-          // auto_replied（マイグレーション5）/ claimed_at（6）/ posted_via（8）を
+          // auto_replied（マイグレーション5）/ claimed_at（6）/ posted_via（10）を
           // ここに入れると、マイグレーションが未適用の環境では PostgREST が列を
           // 見つけられず**リクエストごと**失敗する。すると「未返信」と誤判定されて
           // 二重投稿につながる。upsert は列を含めない場合、更新時は既存値を保持し、
@@ -142,7 +146,7 @@ export async function syncReviews(userId: string): Promise<SyncResult> {
       imported += rows.length;
     } catch (error) {
       console.error(
-        `review sync failed for location ${connection.location_id}`,
+        `店舗 ${connection.location_id} のレビュー取得に失敗しました`,
         error
       );
       failures.push({
@@ -183,7 +187,7 @@ export async function syncReviews(userId: string): Promise<SyncResult> {
  */
 export async function recordReply(input: {
   reviewId: string;
-  userId?: string;
+  userId: string;
   replyText: string;
   autoReplied: boolean;
 }): Promise<void> {
@@ -194,13 +198,14 @@ export async function recordReply(input: {
     auto_replied: input.autoReplied,
   };
 
-  const save = (payload: Record<string, unknown>) => {
-    const query = admin
+  // user_id は必ず絞ります。RLSはservice_roleでは迂回されるため、
+  // DB側でテナント境界を守らないと他ユーザーのレビューを書き換えられます。
+  const save = (payload: Record<string, unknown>) =>
+    admin
       .from("reviews")
       .update(payload)
-      .eq("id", input.reviewId);
-    return input.userId ? query.eq("user_id", input.userId) : query;
-  };
+      .eq("id", input.reviewId)
+      .eq("user_id", input.userId);
 
   // 出所を残す。NULL のままの返信は「取得で同期したもの」と区別する
   const first = await save({
@@ -212,7 +217,7 @@ export async function recordReply(input: {
   // posted_via カラムが未適用の環境では、列が無いことが原因の可能性が高い。
   // それ以外の原因でも、基本のペイロードで1回だけ試す。
   console.error(
-    "failed to record a posted reply; retrying with the base payload",
+    "投稿した返信を保存できませんでした。基本のペイロードで再試行します",
     first.error
   );
 
@@ -220,8 +225,8 @@ export async function recordReply(input: {
   if (!second.error) return;
 
   console.error(
-    "CRITICAL: a reply was posted to Google but could not be saved locally. " +
-      "The published reply may be overwritten by the next run.",
+    "CRITICAL: Googleへ投稿した返信をローカルへ保存できませんでした。" +
+      "次回の実行で、公開済みの返信が別の文に上書きされる恐れがあります。",
     { reviewId: input.reviewId, error: second.error }
   );
 }

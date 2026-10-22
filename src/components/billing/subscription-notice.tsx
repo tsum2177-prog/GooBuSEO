@@ -17,8 +17,7 @@ export function SubscriptionNotice({ className }: { className?: string }) {
       <div className="space-y-1">
         <p className="font-medium">月額プランが未契約です</p>
         <p>
-          レビューの確認とAI返信の作成（下書き）は無料で使えます。
-          Googleマップへの投稿と自動返信には月額プランのご契約が必要です。
+          レビューの確認とAI返信の作成（下書き）は無料で使えます。Googleマップへの投稿と自動返信には月額プランのご契約が必要です。
         </p>
       </div>
       <Link href="/dashboard" className={buttonVariants({ size: "sm" })}>

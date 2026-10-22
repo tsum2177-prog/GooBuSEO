@@ -23,7 +23,7 @@ export async function GET(request: Request) {
 
   if (oauthError || !code || !state || !savedState || state !== savedState) {
     // 何が欠けていたかをログに残す（握りつぶすと運用中に原因が分からない）
-    console.warn("[oauth] callback rejected", {
+    console.warn("[oauth] コールバックが不正です", {
       hasOauthError: Boolean(oauthError),
       hasCode: Boolean(code),
       hasState: Boolean(state),
@@ -43,7 +43,7 @@ export async function GET(request: Request) {
   try {
     tokens = await exchangeCode(code, getRedirectUri());
   } catch (error) {
-    console.error("[oauth] token exchange failed", {
+    console.error("[oauth] トークンの交換に失敗しました", {
       userId: user.id,
       oauthCode: error instanceof GoogleAuthError ? error.code : undefined,
       error,
@@ -52,7 +52,7 @@ export async function GET(request: Request) {
   }
 
   if (!tokens.refresh_token) {
-    console.warn("[oauth] no refresh token returned; consent must be given again", {
+    console.warn("[oauth] リフレッシュトークンが返っていません。再同意が必要です", {
       userId: user.id,
     });
     redirect("/settings?google=need_reconsent");
@@ -84,7 +84,7 @@ export async function GET(request: Request) {
       }
     }
   } catch (error) {
-    console.error("[oauth] listing or saving locations failed", {
+    console.error("[oauth] 店舗一覧の取得または保存に失敗しました", {
       userId: user.id,
       saved,
       error,
@@ -99,7 +99,7 @@ export async function GET(request: Request) {
   try {
     await syncReviews(user.id);
   } catch (error) {
-    console.error("[oauth] initial review sync failed", {
+    console.error("[oauth] レビューの初回同期に失敗しました", {
       userId: user.id,
       error,
     });

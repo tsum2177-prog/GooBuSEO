@@ -82,8 +82,7 @@ export function ShopSettingsForm({
         <CardHeader>
           <CardTitle>店舗情報</CardTitle>
           <CardDescription>
-            AIが返信文を作るときに使われる店舗名と業種です。Googleマップから
-            自動で入力されるので、変更したい場合だけ編集してください
+            AIが返信文を作るときに使われる店舗名と業種です。Googleマップから自動で入力されるので、変更したい場合だけ編集してください
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -137,7 +136,7 @@ export function ShopSettingsForm({
             maxLength={2000}
           />
           <p className="text-xs text-muted-foreground">
-            箇条書きでもかまいません。例:「駅近」「個室」「深夜営業」
+            箇条書きでもかまいません。例: 「駅近」「個室」「深夜営業」
           </p>
         </CardContent>
       </Card>
@@ -224,8 +223,7 @@ export function ShopSettingsForm({
                 <div className="space-y-1">
                   <Label htmlFor="auto_reply_switch">自動返信をONにする</Label>
                   <p className="text-sm text-muted-foreground">
-                    ONにすると、取得したレビューに自動で返信を投稿します。
-                    OFFの場合でも、レビュー一覧から手動で投稿できます。
+                    ONにすると、取得したレビューに自動で返信を投稿します。OFFの場合でも、レビュー一覧から手動で投稿できます。
                   </p>
                 </div>
                 <Switch
@@ -246,8 +244,7 @@ export function ShopSettingsForm({
           ) : (
             <div className="space-y-3">
               <p className="text-sm text-muted-foreground">
-                自動返信は月額プランのご契約後に使えます。契約すると自動で
-                ONになり、設定を触らずに運用できます。
+                自動返信は月額プランのご契約後に使えます。契約すると自動でONになり、設定に触れずに運用できます。
               </p>
               <Button type="button" variant="outline" nativeButton={false} render={<Link href="/dashboard" />}>
                 月額プランを契約する

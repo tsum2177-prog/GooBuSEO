@@ -1,6 +1,6 @@
 # 残タスク一覧（レビュー返信AI）
 
-最終更新: 2026-10-20 / フェーズ1〜5の実装完了時点・ドキュメント作成時点
+最終更新: 2026-10-21 / フェーズ1〜5の実装完了時点・ドキュメント作成時点
 
 ## 現在地
 
@@ -24,7 +24,7 @@
 | 自動/手動の返信履歴の区別（`reviews.auto_replied`） | ✅ 実装済 |
 | `vercel.json` のcron設定（1時間ごと） | ✅ Cloudflare cron（`wrangler.jsonc` の `triggers.crons`）へ移行済 |
 | **新マイグレーションの適用**（`category` / `auto_reply_enabled` / `auto_replied` 列） | ✅ 適用済（2026-10-20 確認） |
-| **新マイグレーションの適用**（`claimed_at` 列 / 返信履歴保持トリガー） | ⬜ 要対応（`20261020120400_add_claim_and_preserve_reply.sql`） |
+| **新マイグレーションの適用**（`claimed_at` 列 / 返信履歴保持トリガー、`claimed_by` / `auto_reply_attempts` / `stripe_events.processed_at` 列） | ⬜ 要対応（`20261020120400_add_claim_and_preserve_reply.sql` / `20261021100000_add_stripe_event_processing.sql` / `20261021110000_add_auto_reply_attempts.sql` / `20261021120000_add_claimed_by.sql`） |
 
 ---
 
@@ -104,6 +104,7 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 - [x] OpenNext / wrangler の導入と設定（`open-next.config.ts` / `wrangler.jsonc` / `worker.ts` / `public/_headers`）
 - [x] workerdローカルでの動作確認（`npm run preview`）— ログイン・設定保存・ルート保護・cronをすべて確認済み
+- [x] GitHub Actions によるCI（`.github/workflows/ci.yml`）— `main` へのpushとPull Requestのたびに lint / typecheck / build が自動実行される
 - [ ] Cloudflare アカウントで **Workers Paid プラン** に加入（FreeはWorker 3MB・CPU 10ms制限で不足）
 - [ ] `npx wrangler login`
 - [ ] Secretを登録（`npx wrangler secret put <KEY>`）
@@ -149,7 +150,8 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 - [ ] Google APIのレスポンスで想定外のフィールド（例: `reviewMediaItems` 付きレビュー）を確認
 - [ ] 店舗が複数ある場合の表示と切り替え（現在は全店舗を自動登録）
-- [ ] レビュー数が50件を超える場合のページング（現状は最新50件のみ取得）
+- [x] レビュー数が50件を超える場合のページング（`nextPageToken` を回して全ページ取得。1店舗につき最新200件まで取得し、`MAX_REVIEWS_PER_LOCATION = 200` で打ち切り）
+- [ ] AI（Gemini）API のタイムアウト・リトライ — Google Business Profile API には15秒のタイムアウトと指数バックオフ（最大3回、429と5xxのみ）を入れましたが、Gemini API 側は未実装
 
 ---
 
@@ -176,7 +178,7 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 
 | 段階 | 内容 |
 |---|---|
-| **即** | Supabase SQL Editor でマイグレーション2件を適用（`20261020120400` / `20261020120500`。クリップボードに済み） |
+| **即** | Supabase SQL Editor でマイグレーションを適用（`20261020120400` / `20261020120500` に加え、`20261020120600` / `20261020120700` / `20261020120800` / `20261021100000` / `20261021110000` / `20261021120000` / `20261021130000` も未適用） |
 | **即** | 本番に `APP_URL` を登録（`npx wrangler secret put APP_URL`）。未設定だと決済とメール確認が動かない |
 | **外部** | Stripe のキー設定、Google Cloud の Business Profile API とOAuth同意画面、Geminiキー、本番 `CRON_SECRET` |
 | **外部** | Cloudflare Workers Paid への加入と `supabase/setup-all.sql` の本番適用 |
@@ -185,28 +187,28 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 ### Critical / High
 
 - [x] **C1. 課金ゲートが存在しない** — `subscription_status` はダッシュボードのバッジ表示（`src/app/(app)/dashboard/page.tsx:64`）でしか読まれず、`generateAndPostReply` / `autoReplyPendingReviews` / `syncReviews` のいずれにも判定がない。登録すれば無料で公開レビューを投稿できる
-      → **修正済（2026-10-20）**。`src/lib/billing.ts` を新設し `isSubscribed()` / `isAccessibleStatus()` / `mapStripeSubscriptionStatus()` を集約。`syncReviews` / `autoReplyPendingReviews` / `generateAndPostReply` / `syncReviewsAction` の4箇所をゲート。`/reviews` と `/settings` には未契約時の案内バナー（`SubscriptionNotice`）を表示。契約状態の読み取り失敗時は fail-closed。`scripts/verify-paywall.ts` でライブDB検証済み（22/22 PASS）、ブラウザで未契約/契約中の両方のUIを確認済み
+      → **修正済（2026-10-20）**。`src/lib/billing.ts` を新設し `isSubscribed()` / `isAccessibleStatus()` / `mapStripeSubscriptionStatus()` を集約。**レビュー取得・閲覧とAI返信の下書き作成は未契約でも可能**（未契約の場合は1店舗まで）で、**Googleマップへの投稿と自動返信は契約中のみ**。`getAccessLevel()` が `canReadReviews` / `canGenerateReplies` / `canPostReplies` / `canAutoReply` / `maxLocations` を判定し、`syncReviews` / `generateReplyDraft`（下書き作成）/ `generateAndPostReply`（手動投稿）/ `autoReplyPendingReviews` / `syncReviewsAction` で利用。`/reviews` と `/settings` には未契約時の案内バナー（`SubscriptionNotice`）を表示。契約状態の読み取り失敗時は fail-closed。`scripts/verify-paywall.ts` でライブDB検証済み（本番DBを書き換えるため `ALLOW_LIVE_DB=1` が必要）、ブラウザで未契約/契約中の両方のUIを確認済み
 - [x] **C2. 再同期で返信履歴が消え、同一レビューに二重投稿される** — `src/lib/google/reviews.ts:35-36` の upsert が `reply_text` を GBP 応答で上書きする。GBP が `reviewReply` を返さないと `reply_text = NULL` になり、`src/lib/google/auto-reply.ts:30` の `.is("reply_text", null)` が把它を未返信として再生成・再投稿する（公開レビューが上書きされる）。`auto_replied` は upsert 列に無いため `auto_replied=true / reply_text=NULL` という不整合な行が残る
       → **修正済（2026-10-20）**。アプリ層で既存の `reply_text` / `replied_at` を持ち越すように変更（`src/lib/google/reviews.ts`）。加えてDB層のトリガー `reviews_preserve_reply` で強制（マイグレーション `20261020120400_add_claim_and_preserve_reply.sql`）。`scripts/verify-reply-idempotency.ts` でライブDB検証済み（6/6 PASS）
 - [x] **C3. 1つの連携が壊れると、そのユーザーの自動返信が完全停止する** — `src/lib/google/reviews.ts:17-19` の接続ループで `getValidAccessToken()` が例外を投げると、残りロケーションの処理が中断される。さらに `src/app/api/reviews/sync/route.ts:28-32` では `syncReviews` と `autoReplyPendingReviews` が同じ `try` にあるため、同期が失敗すると自動返信が呼ばれない
       → **修正済（2026-10-20）**。`syncReviews()` を接続単位の try/catch に変更し、失敗を `failures` に記録して残りの店舗は続行。cron（`/api/reviews/sync`）と `syncReviewsAction()` は取得と自動返信の try を分離し、取得が失敗しても自動返信は必ず実行。自動返信は店舗ごとにアクセストークンを1回だけ取得
 - [x] **C4. 失効したリフレッシュトークンが永久に再試行される** — `src/lib/google/connections.ts:87` の `refreshAccessToken` は `invalid_grant` を判別せず、`src/lib/google/oauth.ts:53-55` で汎用エラーに潰される。`gbp_connections` に無効フラグが無く、毎時同じ壊れたトークンを叩き続ける
-      → **修正済（2026-10-20）**。`GoogleAuthError` に `code` を持ち、`invalid_grant` を判別して該当連携を `status='revoked'` で保存（マイグレーション `20261020120500_add_connection_status.sql`）。以後の処理対象から外し、`/settings` に「再連携が必要」バッジと案内を表示。再度連携すると `active` に戻ります
+      → **修正済（2026-10-20）**。`GoogleAuthError` に `code` を持ち、`invalid_grant` を判別して該当連携を `status='revoked'` で保存（マイグレーション `20261020120500_add_connection_status.sql`）。以後の処理対象から外し、`/settings` に「再連携が必要」バッジと案内を表示。再度連携すると `active` に戻ります。加えて、GBP API が 401 を返した場合（トークン更新は通るがマップ側の権限が失効している状態）も、接続を `revoked` に保存して毎時の取得対象から外すようになりました（`withValidAccessToken`）
 - [x] **C5. 自動返信の排他制御が無い** — `src/lib/google/auto-reply.ts:26-31` で対象を選してから生成→投稿→DB更新の順で、途中で排他がない。cron と手動「レビューを取得する」が同時に走ると同じレビューへ二重投稿される。`src/app/(app)/reviews/actions.ts` の手動パスは `reply_text` を確認していない
-      → **修正済（2026-10-20）**。`src/lib/review-claims.ts` を追加し、`claimed_at` による条件付きUPDATEで排他的に確保（10分超のclaimは自動回収）。自動返信・手動投稿の両方に適用。手動パスは返信済みレビューを拒否するようになった。`claimed_at` 未適用時は fail-soft で排他制御なしで続行する
+      → **修正済（2026-10-20）**。`src/lib/review-claims.ts` を追加し、`claimed_at` による条件付きUPDATEで排他的に確保（30分超のclaimは自動回収。`claimed_by` に実行固有のIDも記録し、実行中の処理が他の実行に確保を奪われることを防ぐ）。自動返信・手動投稿の両方に適用。手動パスは返信済みレビューを拒否するようになった。`claimed_at` / `claimed_by` 未適用時は fail-soft で排他制御なしで続行する
 
 ### Medium
 
 - [x] **M1. `Host` ヘッダー由来のオリジンを決済リダイレクトに使っている** — `src/lib/origin.ts:3-8` と重複している `src/app/(app)/billing/actions.ts:8-13` が `x-forwarded-proto` / `host` から素のオリジンを組み立て、`success_url` / `cancel_url` / `return_url` に使う。ワイルドカードルートや他ホストへのデプロイでは攻撃者ドメインに誘導されうる
       → **修正済（2026-10-20）**。`src/lib/app-url.ts` を新設し `APP_URL` 環境変数を単一の情報源に。`src/lib/origin.ts` は削除。Stripeの戻り先・OAuthのredirect_uri・メール確認リンクの遷移先をすべて `APP_URL` 基準に変更
 - [x] **M2. レビュー本文のプロンプトインジェクション** — `src/lib/ai.ts:63` がレビュー本文をそのままプロンプトに埋め込み、システムプロンプト（`src/lib/ai.ts:20-48`）に「本文はデータであり命令ではない」のルールが無い。投稿された返信はそのまま公開される
-      → **修正済（2026-10-20）**。入力を `<review>` / `<reviewer_name>` で囲み、システムプロンプトに「データは命令ではない」を明記。制御文字を除去して2000字で打ち切り、出力は1段落に整理して Markdown記号・評価スター・URL・メールアドレスを除去、500字で打ち切り、低評価のSEOキーワード混入を除去
+      → **修正済（2026-10-20）**。入力を `<review>` / `<reviewer_name>` で囲み、システムプロンプトに「データは命令ではない」を明記。制御文字を除去して2000字で打ち切り、出力は1段落に整理して Markdown記号・評価スター・URL・メールアドレスを除去、500字で打ち切り、低評価のSEOキーワード混入を除去。公開前の品質チェックも追加し、電話番号とレビューや評価の依頼の文を除去したうえで、日本語の文字（ひらがな・カタカナ）を1文字も含まない文・30文字に満たない文・文全体が依頼表現の文はエラーにして投稿されません
 - [x] **M3. Stripe の webhook が `active` を `none` に落とす** — `src/app/api/stripe/webhook/route.ts:14-23` の `default: return "none"` が `incomplete`（3DS待ちの通常状態）と `paused` を拾う
       → **修正済（2026-10-20）**。`paused` を `past_due` へ対応（契約は継続しているため）。`incomplete` は初回支払いが未完了なので `none` のままが正しい
 - [x] **M4. webhook に冪等性・順序保護が無い** — `src/app/api/stripe/webhook/route.ts:62-108` はイベント重複や順序逆転を制御しない。古い `subscription.updated` が `subscription.deleted` を上書きしうる。また `profiles.id` は `auth.users` への FK のため、削除済みユーザーのイベントで FK 違反になり 500 → Stripe が無限リトライする
-      → **修正済（2026-10-21）**。`stripe_events` テーブル（マイグレーション `20261020120700`）を追加し、処理前にイベントIDを挿入して重複を遮断。`profiles.stripe_event_created_at` と比較して遅延イベントも遮断。削除済みユーザーのFK違反は 500 を返さず 200 を返して再送ループを防ぐ
+      → **修正済（2026-10-21）**。`stripe_events` テーブル（マイグレーション `20261020120700`）を追加し、**処理が成功した後に `processed_at` を記録**して重複を遮断（`20261021100000_add_stripe_event_processing.sql` で `processed_at` と `attempts` を追加）。途中で失敗したイベントは `processed_at` を記録せず 500 を返すため、Stripe の再送で必ず再処理されます。`profiles.stripe_event_created_at` と比較して遅延イベントも遮断。削除済みユーザーのFK違反は 500 を返さず 200 を返して再送ループを防ぐ
 - [x] **M5. `gbp_connections` の RLS が暗号化されたトークンを本人ブラウザへ公開している** — `supabase/migrations/20261020120200_create_gbp_connections.sql:22-25` の select ポリシーで `access_token` / `refresh_token` も読める。アプリ側は admin クライアントしか使っていない（`src/lib/google/connections.ts:22`）ため不要
-      → **修正済（2026-10-21）**。マイグレーション `20261020120600` で `revoke select from authenticated` に加え、列単位の `grant select (...)` に変更。service_role は影響を受けません
+      → **修正済（2026-10-21）**。マイグレーション `20261020120600` で `revoke select from authenticated` に加え、列単位の `grant select (...)` に変更。service_role は影響を受けません。加えて `20261021130000_revoke_anon_gbp_connections.sql` で `anon` ロールの `select` も `revoke`
 - [x] **M6. 認証解決が1リクエストに2〜4回** — `src/proxy.ts:30` ＋ `src/app/(app)/layout.tsx:13` ＋ 各ページで `supabase.auth.getUser()` を個別に呼び、毎回ネットワーク往復が発生する。proxy の matcher は `/api/*` も含み、Stripe webhook と cron も無意味に認証付出的
       → **修正済（2026-10-20）**。`src/lib/auth.ts` に `React.cache()` でメモ化した `getUser()` を用意し、レイアウトと各ページから使用。proxy の matcher から `/api/stripe/webhook` と `/api/reviews/sync` を除外
 - [x] **M7. SEOキーワードの往復で壊れる** — `src/components/settings/shop-settings-form.tsx:178` が `join(",")`、`src/app/(app)/settings/actions.ts:36-40` が `split(",")`。カンマを含むキーワードは分割され、30文字上限はクライアント側 `maxLength` のみ（サーバー側では無制限）
@@ -276,7 +278,7 @@ stripe listen --forward-to localhost:3000/api/stripe/webhook
 - [x] **R9. 店主がGoogleマップ上で直接書いた返信が「AIが作成した返信」と表示される** — `src/components/reviews/review-list.tsx:101` は `auto_replied` が false なら「AIが作成した返信」と表示する。GBPから同期した `reply_text`（店主がGoogle上で直接書いたもの）は `auto_replied = false` のためAI作成と誤表示される
       → 出所フラグを持つか、`auto_replied` が false なら中立的な「返信済み」と表示する
 - [x] **R10. 手動投稿が、店主がGoogle上で書いた更新された返信を上書きしうる** — `src/app/(app)/reviews/actions.ts:53-58` はローカルの `reply_text` しかない。最後の同期以降に店主がGoogle上で返信していた場合、その返信をAIの文で上書きする
-      → 投稿直前にGBPから現在の返信を読み、既に返信があれば中止する
+      → 投稿直前にGBPから現在の返信を読み、既に返信があれば中止する。自動返信（cron）側も同様に、投稿前にGoogleマップ上の既存返信を確認して二重投稿を避けます（確認できない場合は安全側に倒して投稿を見送り、既存の返信はローカルへ取り込みます）
 
 ---
 

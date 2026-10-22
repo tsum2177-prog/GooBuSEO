@@ -47,17 +47,24 @@ export async function POST(request: Request) {
 
   const admin = createAdminClient();
 
-  // Stripe は一度以上送信してくるため、同一イベントは一度だけ処理する
-  const { data: recorded, error: recordError } = await admin
+  // Stripe は一度以上送信してくるため、同一イベントは一度だけ処理する。
+  // ただし「処理済み」の記録は処理が成功したあとに書き込む。
+  // 処理前に記録すると、途中で失敗して500を返したイベントが
+  // 再送時に「重複」と判定されて200で返り、永久に取りこぼされる。
+  // ここでの upsert はイベント行の存在確認と、未処理なら行の用意を兼ねる。
+  const { data: eventState, error: stateError } = await admin
     .from("stripe_events")
-    .upsert({ id: event.id }, { onConflict: "id", ignoreDuplicates: true })
-    .select("id");
+    .upsert({ id: event.id }, { onConflict: "id" })
+    .select("id, processed_at, attempts")
+    .maybeSingle();
 
-  if (recordError) {
+  if (stateError) {
     // 記録できない環境では重複を握りつぶして処理を続行する
-    console.error("[stripe] failed to record the event", recordError);
-  } else if (!recorded || recorded.length === 0) {
-    console.warn("[stripe] skipping a duplicate event", { id: event.id });
+    console.error("[stripe] イベントの状態を確認できませんでした", stateError);
+  } else if (eventState?.processed_at) {
+    console.warn("[stripe] 処理済みのイベントなのでスキップします", {
+      id: event.id,
+    });
     return NextResponse.json({ received: true, duplicate: true });
   }
 
@@ -91,10 +98,12 @@ export async function POST(request: Request) {
             .upsert(row, { onConflict: "id" });
 
           if (isMissingUser(error)) {
-            console.warn("[stripe] skipping an event for a deleted user", {
+            console.warn("[stripe] 削除済みユーザーのイベントなのでスキップします", {
               event: event.type,
               error,
             });
+            // スキップも「処理済み」として記録する（再送で同じ処理を繰り返さない）
+            await markEventProcessed(admin, event.id);
             return NextResponse.json({ received: true, skipped: true });
           }
           if (error) throw error;
@@ -121,7 +130,7 @@ export async function POST(request: Request) {
         const userId = subscription.metadata.user_id;
         if (userId) {
           if (await isStaleEvent(admin, userId, event.created)) {
-            console.warn("[stripe] skipping an out-of-order event", {
+            console.warn("[stripe] 古いイベントなのでスキップします", {
               event: event.type,
               userId,
               eventAt,
@@ -134,10 +143,12 @@ export async function POST(request: Request) {
             .upsert({ id: userId, ...patch }, { onConflict: "id" });
 
           if (isMissingUser(error)) {
-            console.warn("[stripe] skipping an event for a deleted user", {
+            console.warn("[stripe] 削除済みユーザーのイベントなのでスキップします", {
               event: event.type,
               error,
             });
+            // スキップも「処理済み」として記録する（再送で同じ処理を繰り返さない）
+            await markEventProcessed(admin, event.id);
             return NextResponse.json({ received: true, skipped: true });
           }
           if (error) throw error;
@@ -156,7 +167,7 @@ export async function POST(request: Request) {
           if (error) throw error;
           if (count === 0) {
             console.warn(
-              "[stripe] no profile matched the customer",
+              "[stripe] 顧客に一致するプロファイルがありません",
               { customerId, event: event.type }
             );
           }
@@ -165,12 +176,62 @@ export async function POST(request: Request) {
       }
     }
   } catch (error) {
-    // 一時的な失敗は 500 を返して Stripe に再送させる
-    console.error("[stripe] handler failed", { event: event.type, error });
+    // 一時的な失敗は500を返してStripeに再送させる。
+    // processed_at は記録しないので、再送ではこの処理がもう一度走って取りこぼされない。
+    console.error("[stripe] イベントの処理に失敗しました", { event: event.type, error });
+    await incrementAttempts(admin, event.id, eventState?.attempts);
     return NextResponse.json({ error: "処理エラー" }, { status: 500 });
   }
 
+  // 処理が成功したことを記録する。ここが「処理済み」の目印になる。
+  await markEventProcessed(admin, event.id);
+
   return NextResponse.json({ received: true });
+}
+
+/**
+ * イベントを「処理済み」として記録します。
+ *
+ * 同じイベントIDの行が既にあれば更新し、無い場合は作ります（upsert）。
+ * 記録に失敗してもWebhookの処理自体は成功として扱います。
+ * 500を返すとStripeが再送して二重処理になるためです。
+ */
+async function markEventProcessed(
+  admin: ReturnType<typeof createAdminClient>,
+  eventId: string
+): Promise<void> {
+  const { error } = await admin
+    .from("stripe_events")
+    .upsert(
+      { id: eventId, processed_at: new Date().toISOString() },
+      { onConflict: "id" }
+    );
+
+  if (error) {
+    console.error("[stripe] 処理済みの記録に失敗しました", { id: eventId, error });
+  }
+}
+
+/**
+ * 失敗したイベントの試行回数を増やします。
+ *
+ * 運用で「再送を繰り返しても取りこぼされている」イベントを
+ * 把握できるようにするためのカウンタです。
+ */
+async function incrementAttempts(
+  admin: ReturnType<typeof createAdminClient>,
+  eventId: string,
+  currentAttempts?: number
+): Promise<void> {
+  const attempts = (currentAttempts ?? 0) + 1;
+
+  const { error } = await admin
+    .from("stripe_events")
+    .upsert({ id: eventId, attempts }, { onConflict: "id" });
+
+  if (error) {
+    console.error("[stripe] 試行回数の更新に失敗しました", { id: eventId, error });
+  }
 }
 
 /**
@@ -191,7 +252,7 @@ async function enableAutoReply(
     .maybeSingle();
 
   if (error) {
-    console.error("[stripe] failed to read shop settings", error);
+    console.error("[stripe] 店舗設定を読み取れませんでした", error);
     return;
   }
 
@@ -200,7 +261,7 @@ async function enableAutoReply(
       .from("shop_settings")
       .upsert({ id: userId, auto_reply_enabled: true }, { onConflict: "id" });
     if (insertError) {
-      console.error("[stripe] failed to enable auto reply", insertError);
+      console.error("[stripe] 自動返信を有効化できませんでした", insertError);
     }
     return;
   }
@@ -210,7 +271,7 @@ async function enableAutoReply(
     .update({ auto_reply_enabled: true })
     .eq("id", userId);
   if (updateError) {
-    console.error("[stripe] failed to enable auto reply", updateError);
+    console.error("[stripe] 自動返信を有効化できませんでした", updateError);
   }
 }
 
@@ -233,7 +294,7 @@ async function isStaleEvent(
     .maybeSingle();
 
   if (error) {
-    console.error("[stripe] failed to read the last event time", error);
+    console.error("[stripe] 前回のイベント時刻を読み取れませんでした", error);
     return false;
   }
 
